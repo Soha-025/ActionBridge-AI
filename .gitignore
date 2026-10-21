@@ -1,0 +1,13 @@
+# Environment / secrets
+.env
+
+# Local databases
+*.db
+
+# Python
+__pycache__/
+.venv/
+
+# Node / frontend
+node_modules/
+dist/
