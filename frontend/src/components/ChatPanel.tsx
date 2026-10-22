@@ -14,6 +14,13 @@
  *   trip to Today/Upcoming/Conflicts. This is UI-session history only: the
  *   backend keeps no chat memory, `session_id` is not persisted server-side,
  *   and a page reload starts a new conversation.
+ *
+ * Voice additions (M2, additive only — original behavior unchanged):
+ * - Mic button: browser-native dictation into the composer (en-US, live
+ *   interim transcript). Existing send()/retry/pending-change flow untouched.
+ * - Per-assistant-bubble speaker toggle + optional "Auto-read replies"
+ *   switch. Both degrade gracefully when the browser lacks the APIs.
+ * - See frontend/src/hooks/useSpeech.ts (isolated helper, no new deps).
  */
 
 import {
@@ -24,6 +31,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { api, ApiError } from "../api";
+import { useSpeechRecognition, useSpeak } from "../hooks/useSpeech";
 import type { ChatResponse, ToolCall } from "../types";
 
 interface ChatMessage {
@@ -94,6 +102,63 @@ export default function ChatPanel({
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // --- Voice state (M2 additive) -------------------------------------------
+  const [autoRead, setAutoRead] = useState(false);
+  /** Composer text before the current dictation started. */
+  const dictSnapshotRef = useRef("");
+  /** Mirror of `draft` readable inside stable speech callbacks. */
+  const draftRef = useRef("");
+  draftRef.current = draft;
+  /** Assistant messages auto-read already (never re-read on toggle). */
+  const readIdsRef = useRef<Set<string>>(new Set());
+  const lastMsgIdRef = useRef<string | null>(null);
+
+  const dictation = useSpeechRecognition({
+    onTranscript: (full) => {
+      // Rebuild from the pre-recording snapshot + live transcript, so typed
+      // text is preserved and interim results never double-append.
+      const base = dictSnapshotRef.current.trimEnd();
+      setDraft(base ? `${base} ${full}` : full);
+    },
+  });
+
+  const tts = useSpeak();
+  // Stable callbacks / primitives from the hook, so the effects below only
+  // re-run on real changes rather than on every render (the `tts` object
+  // itself is recreated each render).
+  const { supported: ttsSupported, speak: ttsSpeak, stop: ttsStop } = tts;
+
+  const handleMicClick = useCallback(() => {
+    if (tts.speakingId) ttsStop();
+    if (!dictation.listening) {
+      dictSnapshotRef.current = draftRef.current;
+    }
+    dictation.toggle();
+  }, [dictation, tts.speakingId, ttsStop]);
+
+  // Auto-read: only brand-new, non-degraded assistant replies get spoken,
+  // and only while the Assistant view is on screen.
+  useEffect(() => {
+    if (!autoRead || !ttsSupported) return;
+    const last = messages[messages.length - 1];
+    if (!last || last.id === lastMsgIdRef.current) return;
+    lastMsgIdRef.current = last.id;
+    if (last.role !== "assistant" || last.degraded) return;
+    if (readIdsRef.current.has(last.id)) return;
+    readIdsRef.current.add(last.id);
+    if (active) ttsSpeak(last.id, last.text);
+  }, [messages, autoRead, active, ttsSupported, ttsSpeak]);
+
+  // Leaving the Assistant view silences any ongoing speech.
+  useEffect(() => {
+    if (!active) ttsStop();
+  }, [active, ttsStop]);
+
+  // Sending a new message cancels whatever is currently being read.
+  useEffect(() => {
+    if (sending) ttsStop();
+  }, [sending, ttsStop]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -256,6 +321,26 @@ export default function ChatPanel({
                 </div>
               )}
 
+              {/* Voice: manual read-aloud toggle. Degraded fallback replies
+                  are intentionally not speakable. */}
+              {m.role === "assistant" && !m.degraded && tts.supported && (
+                <div className="ab-msg__actions">
+                  <button
+                    type="button"
+                    className="ab-btn ab-btn--ghost ab-btn--sm ab-speak-btn"
+                    onClick={() => tts.toggleSpeak(m.id, m.text)}
+                    aria-pressed={tts.speakingId === m.id}
+                    title={
+                      tts.speakingId === m.id
+                        ? "Stop reading this reply"
+                        : "Read this reply aloud"
+                    }
+                  >
+                    {tts.speakingId === m.id ? "⏹ Stop" : "🔊 Speak"}
+                  </button>
+                </div>
+              )}
+
               {m.role === "user" && m.failed && (
                 <div style={{ marginTop: 8 }}>
                   <button
@@ -297,7 +382,39 @@ export default function ChatPanel({
         </div>
       )}
 
+      {/* Voice: dictation problems show here, separate from API errors. */}
+      {dictation.error && (
+        <div style={{ padding: "0 18px" }}>
+          <div className="ab-banner ab-banner--warning" role="alert">
+            <div>{dictation.error}</div>
+          </div>
+        </div>
+      )}
+
       <div className="ab-chat__composer">
+        {/* Voice: optional auto-read switch (lives here so no other team
+            component needs to change). Hidden when TTS is unavailable. */}
+        {tts.supported && (
+          <div className="ab-voice-bar">
+            <label className="ab-voice-toggle">
+              <input
+                type="checkbox"
+                checked={autoRead}
+                onChange={(e) => {
+                  setAutoRead(e.target.checked);
+                  if (!e.target.checked) tts.stop();
+                }}
+              />
+              Auto-read new replies
+            </label>
+            {!dictation.supported && (
+              <span className="ab-voice-note">
+                Voice input isn’t supported in this browser — typing still works.
+              </span>
+            )}
+          </div>
+        )}
+
         <textarea
           ref={inputRef}
           className="ab-chat__textarea"
@@ -311,17 +428,43 @@ export default function ChatPanel({
         />
         <div className="ab-chat__row">
           <span className="ab-chat__hint">
-            Suggestions are grounded in your saved commitments. Changes are confirmed
-            before they are applied.
+            {dictation.listening
+              ? "Listening… speak now (en-US). Click Stop when you're done."
+              : "Suggestions are grounded in your saved commitments. Changes are confirmed" +
+                " before they are applied."}
           </span>
-          <button
-            type="button"
-            className="ab-btn ab-btn--primary"
-            onClick={() => void send(draft)}
-            disabled={sending || draft.trim().length === 0}
-          >
-            {sending ? "Sending…" : "Send"}
-          </button>
+          <div className="ab-chat__controls">
+            {/* Voice: mic button. Rendered only when the browser supports it;
+                otherwise the toggle above shows a quiet note. */}
+            {dictation.supported && (
+              <button
+                type="button"
+                className={
+                  dictation.listening
+                    ? "ab-btn ab-btn--sm ab-mic-btn ab-mic-btn--live"
+                    : "ab-btn ab-btn--sm ab-mic-btn"
+                }
+                onClick={handleMicClick}
+                disabled={sending}
+                aria-pressed={dictation.listening}
+                title={
+                  dictation.listening
+                    ? "Stop dictation"
+                    : "Dictate your message with the microphone"
+                }
+              >
+                {dictation.listening ? "⏹ Stop" : "🎙 Speak"}
+              </button>
+            )}
+            <button
+              type="button"
+              className="ab-btn ab-btn--primary"
+              onClick={() => void send(draft)}
+              disabled={sending || draft.trim().length === 0}
+            >
+              {sending ? "Sending…" : "Send"}
+            </button>
+          </div>
         </div>
       </div>
     </div>
