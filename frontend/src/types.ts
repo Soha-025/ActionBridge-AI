@@ -86,6 +86,13 @@ export interface CommitmentsResponse {
 /** Response for GET /api/plan. */
 export interface PlanResponse {
   plan_items: PlanItem[];
+  /**
+   * NOT SENT by the current backend (`/api/plan` returns only `plan_items`).
+   * Declared optional so the UI can prefer an authoritative server-side
+   * reference date the moment M2 exposes one; until then the client falls back
+   * to VITE_DEMO_TODAY and then to the browser clock. Never assumed present.
+   */
+  today?: string;
 }
 
 /** Response for GET /api/conflicts (requires commitment_id + new_due_date). */
@@ -125,7 +132,9 @@ export interface ApplyChangeResponse {
   change_id: string;
   status: string;
   summary: string;
-  commitment: Commitment;
+  /** The backend returns the updated commitment row; null only if the reply is
+   *  malformed, so callers must handle it instead of assuming a shape. */
+  commitment: Commitment | null;
   plan_items: PlanItem[];
 }
 

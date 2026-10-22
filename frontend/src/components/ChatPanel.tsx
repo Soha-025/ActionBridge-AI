@@ -9,12 +9,16 @@
  * - Shows the actual agent `tool_calls` activity (name + status).
  * - Detects a real `pending_change_id` and hands it to the parent so the
  *   confirmation modal can open. Never fabricates a reply or change id.
+ * - Conversation state belongs to this component and the component stays
+ *   mounted while you navigate (App keeps it alive), so history survives a
+ *   trip to Today/Upcoming/Conflicts. This is UI-session history only: the
+ *   backend keeps no chat memory, `session_id` is not persisted server-side,
+ *   and a page reload starts a new conversation.
  */
 
 import {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -28,9 +32,17 @@ interface ChatMessage {
   text: string;
   toolCalls?: ToolCall[];
   failed?: boolean;
+  /** Assistant replied, but the provider was unreachable — not a real answer. */
+  degraded?: boolean;
+  /** Original user text to re-send when the assistant could not answer. */
+  retryText?: string;
 }
 
 interface ChatPanelProps {
+  /** Stable conversation id owned by the parent (survives view switches). */
+  sessionId: string;
+  /** True while the Assistant view is on screen — used to focus/scroll. */
+  active: boolean;
   /** Parent opens the ConfirmModal with this real change id. */
   onPendingChange: (changeId: string) => void;
   /** Called after any assistant turn so the parent can refresh the dashboard. */
@@ -58,15 +70,27 @@ function summarizeToolInput(input: Record<string, unknown>): string {
     .join(", ");
 }
 
-export default function ChatPanel({ onPendingChange, onAfterTurn }: ChatPanelProps) {
-  // A stable per-session id for the backend ChatRequest contract.
-  const sessionId = useMemo(() => newId(), []);
+/**
+ * Display heuristic — NOT a status code check. When the model provider fails,
+ * backend/main.py still answers HTTP 200 with a fixed "temporarily
+ * unavailable" sentence and empty tool_calls, so the UI cannot tell a degraded
+ * reply apart from an answer by transport alone. We show the real text verbatim
+ * but style it as a warning (never as a successful answer) and offer a retry.
+ */
+function looksLikeProviderFallback(text: string): boolean {
+  return /temporarily unavailable|model provider/i.test(text);
+}
 
+export default function ChatPanel({
+  sessionId,
+  active,
+  onPendingChange,
+  onAfterTurn,
+}: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [lastFailedText, setLastFailedText] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -77,13 +101,22 @@ export default function ChatPanel({ onPendingChange, onAfterTurn }: ChatPanelPro
     }
   }, [messages, sending]);
 
+  // Coming back to the Assistant view: the panel was kept mounted, so jump to
+  // the newest message and hand focus to the composer.
+  useEffect(() => {
+    if (!active) return;
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+    inputRef.current?.focus();
+  }, [active]);
+
   const send = useCallback(
     async (rawText: string) => {
       const text = rawText.trim();
       if (!text || sending) return; // guard against empty + duplicate submits
 
       setError(null);
-      setLastFailedText(null);
 
       const userMsg: ChatMessage = { id: newId(), role: "user", text };
       setMessages((prev) => [...prev, userMsg]);
@@ -92,12 +125,15 @@ export default function ChatPanel({ onPendingChange, onAfterTurn }: ChatPanelPro
 
       try {
         const res = await api.chat({ session_id: sessionId, text });
+        const replyText = res.reply?.trim() ? res.reply : "(The assistant returned no text.)";
 
         const assistantMsg: ChatMessage = {
           id: newId(),
           role: "assistant",
-          text: res.reply?.trim() ? res.reply : "(The assistant returned no text.)",
+          text: replyText,
           toolCalls: res.tool_calls ?? [],
+          degraded: looksLikeProviderFallback(replyText),
+          retryText: text,
         };
         setMessages((prev) => [...prev, assistantMsg]);
 
@@ -114,8 +150,8 @@ export default function ChatPanel({ onPendingChange, onAfterTurn }: ChatPanelPro
             ? err.message
             : "Something went wrong while contacting the assistant.";
         setError(message);
-        setLastFailedText(text);
-        // Mark the just-sent user message as failed so retry re-sends it.
+        // Mark the just-sent user message as failed so its Retry re-sends it.
+        // (One retry affordance per failure — the banner stays informational.)
         setMessages((prev) =>
           prev.map((m) => (m.id === userMsg.id ? { ...m, failed: true } : m)),
         );
@@ -176,7 +212,12 @@ export default function ChatPanel({ onPendingChange, onAfterTurn }: ChatPanelPro
               {m.role === "user" ? "You" : "AB"}
             </div>
             <div>
-              <div className="ab-msg__bubble">{m.text}</div>
+              <div
+                className={`ab-msg__bubble${m.degraded ? " ab-msg__bubble--warning" : ""}`}
+                role={m.degraded ? "alert" : undefined}
+              >
+                {m.text}
+              </div>
 
               {m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0 && (
                 <div className="ab-toolcalls">
@@ -199,6 +240,19 @@ export default function ChatPanel({ onPendingChange, onAfterTurn }: ChatPanelPro
                       </code>
                     </div>
                   ))}
+                </div>
+              )}
+
+              {m.role === "assistant" && m.degraded && (
+                <div style={{ marginTop: 8 }}>
+                  <button
+                    type="button"
+                    className="ab-btn ab-btn--sm"
+                    onClick={() => void send(m.retryText ?? "")}
+                    disabled={sending || !m.retryText}
+                  >
+                    Try again
+                  </button>
                 </div>
               )}
 
@@ -238,19 +292,7 @@ export default function ChatPanel({ onPendingChange, onAfterTurn }: ChatPanelPro
       {error && (
         <div style={{ padding: "0 18px" }}>
           <div className="ab-banner ab-banner--error" role="alert">
-            <div style={{ display: "flex", alignItems: "center", gap: 12, width: "100%" }}>
-              <span style={{ flex: "1 1 auto" }}>{error}</span>
-              {lastFailedText && (
-                <button
-                  type="button"
-                  className="ab-btn ab-btn--sm"
-                  onClick={() => void send(lastFailedText)}
-                  disabled={sending}
-                >
-                  Retry
-                </button>
-              )}
-            </div>
+            <div>{error}</div>
           </div>
         </div>
       )}

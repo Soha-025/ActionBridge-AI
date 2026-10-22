@@ -8,13 +8,16 @@
  * - States plainly that nothing is applied yet.
  * - Separate Apply / Cancel actions that hit the real endpoints.
  * - Blocks duplicate requests, shows progress, surfaces meaningful errors.
+ * - Success is reported only from the server's own response body, never
+ *   assumed from a 2xx status or patched together on the client.
  * - On successful apply, notifies the parent so the dashboard refreshes.
  * - Closing the modal (X / Esc / backdrop) NEVER cancels the server proposal.
+ *   The proposal stays pending and the parent keeps a way to reopen it.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api";
-import type { ChangeDetail } from "../types";
+import type { ApplyChangeResponse, CancelChangeResponse, ChangeDetail } from "../types";
 
 interface ConfirmModalProps {
   /** The change id to inspect. When null/empty the modal renders nothing. */
@@ -22,10 +25,17 @@ interface ConfirmModalProps {
   open: boolean;
   /** Dismiss the UI only — does NOT cancel the pending server change. */
   onClose: () => void;
-  /** Called after a successful apply so the parent can refresh the dashboard. */
-  onApplied: (detail: ChangeDetail) => void;
-  /** Called after a successful cancel. */
-  onCancelled: (changeId: string) => void;
+  /** Called with the server's apply result after a successful apply. */
+  onApplied: (result: ApplyChangeResponse) => void;
+  /** Called with the server's cancel result after a successful cancel. */
+  onCancelled: (changeId: string, result: CancelChangeResponse) => void;
+  /** Reports the status the server actually returned for this change id, so
+   *  the parent can drop proposals that are no longer actionable. */
+  onStatusObserved?: (changeId: string, status: string) => void;
+  /** Reports a failed load with its HTTP status, so the parent can forget an
+   *  id the server says does not exist (404) while keeping one that only had a
+   *  transient network failure. */
+  onLoadError?: (changeId: string, status: number) => void;
 }
 
 type Phase = "loading" | "ready" | "error";
@@ -36,6 +46,8 @@ export default function ConfirmModal({
   onClose,
   onApplied,
   onCancelled,
+  onStatusObserved,
+  onLoadError,
 }: ConfirmModalProps) {
   const [phase, setPhase] = useState<Phase>("loading");
   const [change, setChange] = useState<ChangeDetail | null>(null);
@@ -62,21 +74,26 @@ export default function ConfirmModal({
           if (cancelled) return;
           setChange(detail);
           setPhase("ready");
+          // Tell the parent what the server really thinks of this proposal.
+          onStatusObserved?.(changeId, detail.status);
           requestAnimationFrame(() => primaryRef.current?.focus());
         })
         .catch((err) => {
           if (cancelled) return;
+          const status = err instanceof ApiError ? err.status : 0;
           setLoadError(
             err instanceof ApiError ? err.message : "Could not load this change. Please try again.",
           );
           setPhase("error");
+          // 404 = the server has no such proposal; anything else may be transient.
+          if (status === 404) onLoadError?.(changeId, status);
         });
       return () => {
         cancelled = true;
       };
     }
     return undefined;
-  }, [open, changeId]);
+  }, [open, changeId, onStatusObserved, onLoadError]);
 
   // Esc dismisses (UI only) and simple focus containment.
   useEffect(() => {
@@ -101,9 +118,19 @@ export default function ConfirmModal({
     setBusy("applying");
     setActionError(null);
     try {
-      await api.applyChange(changeId);
-      const applied: ChangeDetail = { ...change!, status: "applied" };
-      onApplied(applied);
+      const result = await api.applyChange(changeId);
+      if (result.status !== "applied") {
+        // The server answered, but not with an applied change: say so instead
+        // of claiming success, and let the parent prune the stale proposal.
+        onStatusObserved?.(changeId, result.status);
+        setActionError(
+          `The backend did not apply this change (server status: "${result.status}"). Your plan is unchanged.`,
+        );
+        setBusy("idle");
+        return;
+      }
+      onStatusObserved?.(changeId, result.status);
+      onApplied(result);
       onClose();
     } catch (err) {
       setActionError(
@@ -113,18 +140,25 @@ export default function ConfirmModal({
       );
       setBusy("idle");
     }
-  }, [changeId, busy, stillPending, change, onApplied, onClose]);
+  }, [changeId, busy, stillPending, onApplied, onClose, onStatusObserved]);
 
   const handleCancel = useCallback(async () => {
     if (!changeId || busy !== "idle") return;
     setBusy("cancelling");
     setActionError(null);
     try {
-      const res = await api.cancelChange(changeId);
-      onCancelled(changeId);
-      // Reflect server truth without claiming success if it failed above.
+      const result = await api.cancelChange(changeId);
+      if (result.status !== "cancelled") {
+        onStatusObserved?.(changeId, result.status);
+        setActionError(
+          `The backend did not cancel this proposal (server status: "${result.status}").`,
+        );
+        setBusy("idle");
+        return;
+      }
+      onStatusObserved?.(changeId, result.status);
+      onCancelled(changeId, result);
       onClose();
-      void res;
     } catch (err) {
       setActionError(
         err instanceof ApiError
@@ -133,7 +167,7 @@ export default function ConfirmModal({
       );
       setBusy("idle");
     }
-  }, [changeId, busy, onCancelled, onClose]);
+  }, [changeId, busy, onCancelled, onClose, onStatusObserved]);
 
   if (!open || !changeId) return null;
 
@@ -162,7 +196,9 @@ export default function ConfirmModal({
                 Review proposed change
               </h2>
               <p className="ab-modal__sub">
-                Nothing has been applied yet. Review the diff, then confirm.
+                {change && change.status !== "pending"
+                  ? `This proposal is already “${change.status}” on the server — the details below are a record, and no further action is possible.`
+                  : "Nothing has been applied yet. Review the diff, then confirm."}
               </p>
             </div>
             <button

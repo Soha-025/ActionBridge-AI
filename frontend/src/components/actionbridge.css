@@ -265,6 +265,11 @@ button { font-family: inherit; }
 .ab-banner--error { background: var(--danger-soft); color: var(--danger); border-color: #f3c6c6; }
 .ab-banner--info { background: var(--primary-soft); color: var(--primary); border-color: #dcd9fb; }
 .ab-banner--warning { background: var(--warning-soft); color: var(--warning); border-color: #f3e0bd; }
+.ab-banner--success { background: var(--success-soft); color: var(--success); border-color: #bbe9d4; }
+
+/* Dismissible confirmation feedback (apply / cancel results). */
+.ab-flash { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.ab-flash > span:first-child { flex: 1 1 auto; }
 
 .ab-skeleton {
   height: 16px;
@@ -309,6 +314,12 @@ button { font-family: inherit; }
   box-shadow: var(--shadow-sm);
 }
 .ab-msg--user .ab-msg__bubble { background: var(--primary); color: #fff; border-color: var(--primary); }
+/* The assistant could not be reached: shown as a warning, never as a normal answer. */
+.ab-msg__bubble--warning {
+  background: var(--warning-soft);
+  color: var(--warning);
+  border-color: #f3e0bd;
+}
 
 .ab-toolcalls { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
 .ab-toolcall {
@@ -402,6 +413,13 @@ button { font-family: inherit; }
 
 .ab-note { font-size: 12.5px; color: var(--text-muted); }
 
+/* The assistant stays mounted across navigation so the conversation survives;
+   it is hidden with display:none (also removes it from the tab order). */
+.ab-view { min-height: 0; }
+.ab-assistant-slot { display: flex; flex-direction: column; height: calc(100vh - 190px); min-height: 420px; }
+.ab-assistant-slot .ab-card { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.ab-assistant-slot .ab-card__body { flex: 1 1 auto; min-height: 0; padding: 0; }
+
 /* ---------------------------------------------------------- utilities */
 .ab-mono { font-variant-numeric: tabular-nums; }
 .ab-sr-only {
@@ -425,8 +443,11 @@ button { font-family: inherit; }
     gap: 14px;
     padding: 14px 16px;
   }
-  .ab-nav { flex-direction: row; overflow-x: auto; gap: 6px; }
-  .ab-nav__item { white-space: nowrap; }
+  /* Wrap instead of scrolling: at phone widths a scrollable strip hid the last
+     nav item (Assistant) off-screen with no visible affordance. */
+  .ab-nav { flex-direction: row; flex-wrap: wrap; gap: 6px; }
+  .ab-nav__item { white-space: nowrap; flex: 1 1 auto; }
+  .ab-assistant-slot { height: calc(100vh - 260px); min-height: 380px; }
   .ab-nav__label, .ab-sidebar__foot { display: none; }
   .ab-topbar { padding: 16px 18px; }
   .ab-content { padding: 18px; }
