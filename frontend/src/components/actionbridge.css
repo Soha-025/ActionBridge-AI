@@ -453,3 +453,56 @@ button { font-family: inherit; }
   .ab-content { padding: 18px; }
   .ab-msg { max-width: 92%; }
 }
+
+/* ---------------------------------------------------- M5 dashboard panels */
+/* Additions for TodayPlan / CommitmentsPanel / ConflictsPanel. Only new
+   classes: nothing above is redefined, so M1's look stays authoritative. */
+
+/* Status is conveyed by more than colour: completed rows also strike through. */
+.ab-dot--pending { background: var(--warning); }
+.ab-dot--done { background: var(--success); }
+.ab-dot--overdue { background: var(--danger); }
+.ab-row__title--done { text-decoration: line-through; color: var(--text-muted); }
+.ab-row__badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  flex: 0 1 auto;
+  max-width: 46%;
+}
+
+.ab-conflicts { display: flex; flex-direction: column; gap: 12px; }
+.ab-conflict {
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: var(--radius-sm);
+  padding: 13px 15px;
+  background: var(--surface-2);
+}
+.ab-conflict--warning { border-left-color: var(--warning); background: var(--warning-soft); }
+.ab-conflict--danger { border-left-color: var(--danger); background: var(--danger-soft); }
+.ab-conflict__head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ab-conflict__title {
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.ab-conflict__reason { margin: 8px 0 0; font-size: 13px; line-height: 1.5; color: var(--text); }
+.ab-conflict__affected {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border-strong);
+}
+
+@media (max-width: 860px) {
+  .ab-row__badges { max-width: 100%; justify-content: flex-start; }
+  .ab-row { flex-wrap: wrap; align-items: flex-start; }
+}

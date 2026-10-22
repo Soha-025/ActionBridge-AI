@@ -284,6 +284,8 @@ function shapePlanItem(raw: unknown): PlanItem {
     planned_date: asString(r.planned_date),
     status: asString(r.status),
     created_at: asString(r.created_at),
+    // Absent or non-numeric stays null; the UI must not show a made-up estimate.
+    hours: typeof r.hours === "number" && Number.isFinite(r.hours) ? r.hours : null,
   };
 }
 

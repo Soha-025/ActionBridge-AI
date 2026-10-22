@@ -33,6 +33,13 @@ export interface PlanItem {
   planned_date: string;
   status: string;
   created_at: string;
+  /**
+   * NOT SENT by the current backend (`/api/plan` has no effort field). Declared
+   * optional so TodayPlan can render estimated hours the moment M2 exposes the
+   * field; until then it stays absent and the UI says "no estimate" rather than
+   * inventing one.
+   */
+  hours?: number | null;
 }
 
 /** A conflict produced by the contextual conflict checker. */

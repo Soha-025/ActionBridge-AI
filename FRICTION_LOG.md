@@ -43,6 +43,13 @@
 
 **Status:** Pending team integration.
 
+> **Update (Member 5, 2026-10-22):** Resolved in `feature/member-5-dashboard`.
+> The frontend is no longer empty, and the browser-to-backend flow was exercised
+> end-to-end (create → plan → conflict detection → proposal → confirm modal →
+> apply → SQLite persistence, plus the cancel path) against a live FastAPI
+> instance running `DEMO_FALLBACK=true`. Commands and evidence:
+> `docs/dashboard_qa.md`. Live Bedrock is still open in §4.
+
 ## 6. Documentation and Submission Preparation
 **Work completed:** Updated the project README, created the architecture diagram, and prepared the demo script. These files were committed and pushed to the `main` branch.
 

@@ -33,3 +33,21 @@
 
 ## Notes
 These results reflect local checks performed so far. Pending items must be tested before being marked complete.
+
+## 6. Member 5 — Dashboard QA (2026-10-22)
+Full commands, reproduction steps and the unverified list: `docs/dashboard_qa.md`.
+
+- Frontend build: `npm run build` (`tsc --noEmit && vite build`) — **passed**, exit 0.
+- Backend suite re-run on this checkout: `python -m pytest -q` — **147 passed**, 1 non-blocking warning.
+  (Supersedes the 109 in section 1; the suite has grown since that entry.)
+- Lint / frontend unit tests: **not available** — neither is configured in `frontend/package.json`.
+- Browser check of all three panels in both modes (real API + `VITE_DEMO_MODE`): load, multiple
+  rows, completed vs pending, priority, deadline, empty, error+retry, conflict→plan-step matching,
+  responsive down to 390px — **passed**, console clean.
+- End-to-end flow with `DEMO_FALLBACK=true`: create → plan rebuild → `GET /api/conflicts` →
+  `propose_replan` → `GET /api/changes/{id}` → cancel (dates unchanged) → apply after cancel
+  (**HTTP 409**) → UI confirm modal apply → new dates read back from SQLite in a separate process
+  — **passed**.
+- Still **not verified**: live Amazon Bedrock (section 5 / `FRICTION_LOG.md` §4), estimated hours
+  (no backend field), plan-step completion transitions (no endpoint), physical devices, screen
+  readers, non-Chromium browsers.
