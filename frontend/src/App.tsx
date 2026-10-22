@@ -248,8 +248,11 @@ export default function App() {
   const handleStatusObserved = useCallback(
     (changeId: string, status: string) => {
       if (status !== "pending") forgetPending(changeId);
+      // "applied" observed without us having applied it here means the server's
+      // data moved, so the dashboard on screen is stale: resync it.
+      if (status === "applied") void load("refresh");
     },
-    [forgetPending],
+    [forgetPending, load],
   );
 
   /** The server has no such proposal (404): stop offering it. Any other status
