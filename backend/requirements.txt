@@ -6,3 +6,7 @@ botocore[crt]>=1.27.0
 python-dotenv
 mcp>=1.2,<2
 anyio
+# Live Gemini LLM provider (current unified Google Gen AI SDK; provides the
+# GA "Interactions" API used by backend/gemini_provider.py). Optional at import
+# time: gemini_provider imports it lazily, so tests run without it.
+google-genai>=2.32.0
