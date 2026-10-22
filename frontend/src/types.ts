@@ -160,7 +160,7 @@ export interface ConflictsQuery {
 
 /**
  * FastAPI error body. Every non-2xx response from the backend is
- * `{ "detail": "<message> }`, so api.ts surfaces `detail` as the message.
+ * `{ "detail": "<message>" }`, so api.ts surfaces `detail` as the message.
  * (422 validation failures carry `detail` as an ARRAY; api.ts flattens it.)
  */
 export interface ApiErrorBody {
