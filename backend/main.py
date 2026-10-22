@@ -36,7 +36,9 @@ from pydantic import BaseModel
 
 import services
 from agent import ActionBridgeAgent, AgentError
-from llm_provider import BedrockProvider, LLMError
+from demo_provider import DemoProvider
+from gemini_provider import GeminiProvider
+from llm_provider import BedrockProvider, LLMError, LLMProvider
 
 # Load backend/.env if present, without overriding real environment variables
 # and without ever printing values (no secrets are exposed at startup).
@@ -75,10 +77,42 @@ class ChatRequest(BaseModel):
 _AGENT: ActionBridgeAgent | None = None
 
 
+def _fallback_enabled() -> bool:
+    """True only when DEMO_FALLBACK is explicitly set to a truthy value."""
+    return os.environ.get("DEMO_FALLBACK", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _gemini_requested() -> bool:
+    """True when LLM_PROVIDER is explicitly set to 'gemini'."""
+    return os.environ.get("LLM_PROVIDER", "").strip().lower() == "gemini"
+
+
+def build_provider() -> LLMProvider:
+    """Select the LLM provider. Precedence (highest first, never auto-switched):
+
+    1. DEMO_FALLBACK=true   -> deterministic DemoProvider (offline emergency).
+    2. LLM_PROVIDER=gemini  -> live GeminiProvider (hackathon/demo LLM).
+    3. otherwise            -> BedrockProvider (default/primary AWS integration).
+
+    Providers are chosen by explicit configuration only; a failing API call
+    never silently switches providers.
+    """
+    if _fallback_enabled():
+        logger.warning(
+            "DEMO_FALLBACK=true -> using deterministic DemoProvider "
+            "(neither Bedrock nor Gemini is being called)."
+        )
+        return DemoProvider()
+    if _gemini_requested():
+        logger.info("LLM_PROVIDER=gemini -> using live GeminiProvider.")
+        return GeminiProvider()
+    return BedrockProvider()
+
+
 def get_agent() -> ActionBridgeAgent:
     global _AGENT
     if _AGENT is None:
-        _AGENT = ActionBridgeAgent(BedrockProvider())
+        _AGENT = ActionBridgeAgent(build_provider())
     return _AGENT
 
 
