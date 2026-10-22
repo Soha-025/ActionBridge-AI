@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import date, timedelta
 
 import pytest
 
@@ -40,11 +41,27 @@ ALLOWED = {
 
 @pytest.fixture
 def tmp_db(tmp_path, monkeypatch):
+    # DemoProvider now uses the REAL system date, so tests freeze *its* clock by
+    # mocking the single shared date source (`_today`). A Monday is used so the
+    # fixed weekday constants below stay valid. DEMO_TODAY is still set because
+    # services.* (unchanged, out of scope) reads it for its own date logic.
     monkeypatch.setenv("DB_PATH", str(tmp_path / "fallback.db"))
     monkeypatch.setenv("DEMO_TODAY", DEMO_TODAY)
     monkeypatch.delenv("DEMO_FALLBACK", raising=False)
+    monkeypatch.setattr(demo_provider, "_today", lambda: date(2026, 10, 26))
     services.init_db()
     return str(tmp_path / "fallback.db")
+
+
+@pytest.fixture
+def tmp_db_oct22(tmp_path, monkeypatch):
+    """Freeze 'today' to Thursday 2026-10-22 for BOTH provider and services."""
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "oct22.db"))
+    monkeypatch.setenv("DEMO_TODAY", "2026-10-22")
+    monkeypatch.delenv("DEMO_FALLBACK", raising=False)
+    monkeypatch.setattr(demo_provider, "_today", lambda: date(2026, 10, 22))
+    services.init_db()
+    return str(tmp_path / "oct22.db")
 
 
 def chat(text: str) -> dict:
@@ -330,3 +347,221 @@ def test_build_provider_fallback_on(tmp_path, monkeypatch, value):
 
     monkeypatch.setenv("DEMO_FALLBACK", value)
     assert isinstance(main.build_provider(), DemoProvider)
+
+
+# ---------------------------------------------------------------------------
+# E. Generic natural-language handling (arbitrary input, no create_plan default)
+# ---------------------------------------------------------------------------
+
+NEXT_DAY = "2026-10-27"   # DEMO_TODAY (Mon 2026-10-26) + 1 = Tuesday
+MON = "2026-10-26"        # today == tonight
+OLD_RESTRICTIVE = "isn't part of the offline demo"
+
+
+def _created_titles() -> set[str]:
+    return {c["title"] for c in services.get_commitments()["commitments"]}
+
+
+def _due(title: str) -> str | None:
+    for c in services.get_commitments()["commitments"]:
+        if c["title"] == title:
+            return c["due_date"]
+    return None
+
+
+def test_generic_commitment_meeting_tomorrow(tmp_db):
+    result = chat("I have meeting tomorrow")
+    assert "create_commitment" in _titles(result)
+    assert "create_plan" not in _titles(result)          # never default to plan
+    assert _titles(result) <= ALLOWED
+    assert "meeting" in _created_titles()
+    assert _due("meeting") == NEXT_DAY
+
+
+def test_dinner_tonight_creates_commitment_not_plan(tmp_db):
+    # The headline intent-classification bug: must NOT call create_plan.
+    result = chat("dinner tonight")
+    assert "create_commitment" in _titles(result)
+    assert "create_plan" not in _titles(result)
+    assert "dinner" in _created_titles()
+    assert _due("dinner") == MON                         # tonight -> today's DATE
+    assert not _has_fabricated_clock_time(result["reply"])  # ...but no invented hour
+
+
+@pytest.mark.parametrize(
+    "phrase,expected_title,expected_due",
+    [
+        ("dentist Friday", "dentist", FRI),
+        ("submit report Wednesday", "submit report", WED),
+        ("call Sarah Monday", "call Sarah", MON),
+    ],
+)
+def test_generic_commitment_phrasing(tmp_db, phrase, expected_title, expected_due):
+    result = chat(phrase)
+    assert "create_commitment" in _titles(result)
+    assert "create_plan" not in _titles(result)
+    assert expected_title in _created_titles()
+    assert _due(expected_title) == expected_due
+
+
+@pytest.mark.parametrize("phrase", ["hello", "hi", "hey"])
+def test_greeting_is_natural_and_calls_no_tool(tmp_db, phrase):
+    result = chat(phrase)
+    assert result["tool_calls"] == []                    # no MCP call for a greeting
+    assert "ActionBridge" in result["reply"]
+    assert OLD_RESTRICTIVE not in result["reply"]
+    assert "Demo Mode" in result["reply"]
+
+
+@pytest.mark.parametrize("phrase", ["thanks", "thank you", "okay", "got it"])
+def test_acknowledgement_is_brief_and_calls_no_tool(tmp_db, phrase):
+    result = chat(phrase)
+    assert result["tool_calls"] == []
+    assert OLD_RESTRICTIVE not in result["reply"]
+    assert "Demo Mode" in result["reply"]
+
+
+@pytest.mark.parametrize(
+    "phrase", ["what can you do?", "help", "how can you help me?"]
+)
+def test_capability_question_explains_without_overclaiming(tmp_db, phrase):
+    result = chat(phrase)
+    assert result["tool_calls"] == []                    # answering, not acting
+    reply = result["reply"].lower()
+    assert "commitment" in reply and "plan" in reply     # real capabilities only
+    assert OLD_RESTRICTIVE not in result["reply"]
+
+
+def test_unsupported_request_is_helpful_not_rejected(tmp_db):
+    result = chat("tell me a joke")
+    assert result["tool_calls"] == []                    # no random tool
+    assert OLD_RESTRICTIVE not in result["reply"]
+    assert "commitments" in result["reply"].lower()
+    assert "I have a meeting tomorrow" in result["reply"]
+
+
+def test_ambiguous_commitment_asks_for_date(tmp_db):
+    result = chat("I have a meeting")
+    assert result["tool_calls"] == []                    # must not guess a date
+    assert "when" in result["reply"].lower()
+    assert services.get_commitments()["commitments"] == []  # nothing fabricated
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    ["qwerty asdf zxcv", "the purple elephant dances", "12 34 56 ??", "banana"],
+)
+def test_unknown_input_never_defaults_to_create_plan(tmp_db, phrase):
+    result = chat(phrase)
+    # A useful reply, and crucially NOT a silent create_plan / create tool call.
+    assert "create_plan" not in _titles(result)
+    assert "apply_changes" not in _titles(result)
+    assert _titles(result) <= ALLOWED
+    assert OLD_RESTRICTIVE not in result["reply"]
+    assert result["reply"].strip()
+
+
+# ---------------------------------------------------------------------------
+# F. The exact five model-facing tools are unchanged by this fix
+# ---------------------------------------------------------------------------
+
+
+def test_model_facing_tools_remain_exactly_five(tmp_db):
+    registered = {t.name for t in asyncio.run(mcp_server.mcp.list_tools())}
+    assert registered == ALLOWED
+    assert "apply_changes" not in registered
+    assert "cancel_change" not in registered
+    assert "get_change" not in registered
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    ["I have meeting tomorrow", "dinner tonight", "tell me a joke",
+     "what can you do?", "qwerty zxcv", "I have a meeting"],
+)
+def test_arbitrary_input_cannot_reach_apply(tmp_db, monkeypatch, phrase):
+    # None of these should ever route through the human-only apply path.
+    def boom(*a, **k):  # pragma: no cover
+        raise AssertionError("apply_changes must be unreachable from chat")
+
+    monkeypatch.setattr(services, "apply_changes", boom)
+    result = chat(phrase)
+    assert "apply_changes" not in _titles(result)
+
+
+
+# ==========================================================================
+# G. REAL-CURRENT-DATE ANCHORING (DEMO_TODAY is ignored by DemoProvider)
+# ==========================================================================
+# These freeze 'today' to Thursday 2026-10-22 via the tmp_db_oct22 fixture so
+# they never depend on the machine's actual date. 2026-10-22 is a Thursday, so:
+#   tomorrow = 2026-10-23, upcoming Friday = 2026-10-23, Saturday = 2026-10-24.
+OCT22 = "2026-10-22"
+
+
+def test_provider_ignores_DEMO_TODAY(monkeypatch):
+    # The single shared date source must be the real system date, even when a
+    # (now-obsolete) DEMO_TODAY is present in the environment.
+    monkeypatch.setenv("DEMO_TODAY", "2030-01-01")
+    assert demo_provider._today() == date.today()
+
+
+def test_meeting_tonight_uses_real_today(tmp_db_oct22):
+    result = chat("meeting tonight")
+    assert result["tool_calls"][0]["name"] == "create_commitment"
+    assert _due("meeting") == OCT22
+
+
+def test_meeting_today_uses_real_today(tmp_db_oct22):
+    result = chat("meeting today")
+    assert _due("meeting") == OCT22
+
+
+def test_meeting_tomorrow_resolves_to_next_day(tmp_db_oct22):
+    chat("I have a meeting tomorrow")
+    assert _due("meeting") == "2026-10-23"
+
+
+def test_dinner_tonight_still_commitment_not_plan(tmp_db_oct22):
+    result = chat("dinner tonight")
+    assert result["tool_calls"][0]["name"] == "create_commitment"
+    assert "create_plan" not in _titles(result)
+    assert _due("dinner") == OCT22
+
+
+def test_weekday_resolution_based_on_real_date(tmp_db_oct22):
+    chat("meeting Friday")
+    due = _due("meeting")
+    assert due == "2026-10-23"  # the upcoming Friday after Thu 2026-10-22
+    # Independent check: the resolved day really is a Friday and is not before
+    # the mocked today -- proving it keyed off the current date, not a fixed one.
+    resolved = date.fromisoformat(due)
+    assert resolved.weekday() == 4
+    assert resolved >= date(2026, 10, 22)
+
+
+def test_weekday_thursday_on_or_after_today(tmp_db_oct22):
+    # "on or after from_day": Thursday maps to today itself when today is Thu.
+    chat("standup Thursday")
+    assert _due("standup") == OCT22
+
+
+def test_relative_and_weekday_agree_on_today(tmp_db_oct22):
+    # Date consistency: tonight / today / tomorrow all key off the SAME source.
+    chat("yoga tonight")
+    chat("gym today")
+    chat("run tomorrow")
+    tonight = _due("yoga")
+    today = _due("gym")
+    tomorrow = _due("run")
+    assert tonight == today == OCT22
+    assert (date.fromisoformat(tomorrow) - date.fromisoformat(today)) == timedelta(days=1)
+
+
+def test_plan_as_of_line_uses_real_today(tmp_db_oct22):
+    # The assistant must not print a stale fixed demo date in its "as of" line.
+    _seed_three()
+    plan = chat("What should I work on today?")
+    text = plan["reply"].replace("**", "")
+    assert f"as of {OCT22}" in text
+    assert "2026-10-26" not in text  # the old fake DEMO_TODAY must not leak

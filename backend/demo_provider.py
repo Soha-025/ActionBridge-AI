@@ -17,9 +17,22 @@ It is intentionally dumb and transparent:
   * It understands the ActionBridge demo intents -- create commitments, "what
     should I work on today?", a timing/schedule follow-up once a plan exists
     ("timings?", "what time?", "when should I do these?"), change a deadline,
-    and a confirmation like "apply it". Anything else gets a helpful canned
-    reply. The timing follow-up reuses the SAME create_plan tool flow and only
-    reports the real day/date values; it never invents clock times.
+    and a confirmation like "apply it". The timing follow-up reuses the SAME
+    create_plan tool flow and only reports the real day/date values; it never
+    invents clock times.
+  * Beyond those scripted flows it responds usefully to ARBITRARY input: a
+    generic commitment parser recognises natural phrasing ("I have a meeting
+    tomorrow", "dinner tonight", "submit report Wednesday") without
+    hard-coding activity nouns, greetings/acknowledgements/capability
+    questions get short non-tool replies, an under-specified commitment asks
+    for a date instead of guessing, and anything else gets a helpful
+    product-oriented reply. It NEVER silently routes an unknown request to
+    create_plan.
+  * Dates are REAL, not simulated: relative-date reasoning (today/tonight/
+    tomorrow/weekdays) and the "as of <date>" plan line are anchored to the
+    actual current system date via ``date.today()``. DemoProvider deliberately
+    ignores ``DEMO_TODAY`` so Demo Mode behaves like a real application; nobody
+    has to set a fake demo date for it to make sense.
   * It ONLY ever emits the five model-facing tool calls. It never emits
     ``apply_changes`` / ``cancel_change`` / ``get_change`` -- and those are
     already unreachable through the agent's structural allowlist anyway.
@@ -34,7 +47,6 @@ selected only when ``DEMO_FALLBACK=true``.
 from __future__ import annotations
 
 import json
-import os
 import re
 from datetime import date, timedelta
 
@@ -71,7 +83,7 @@ _TYPE_HINTS = (
 )
 
 _CONFIRM_WORDS = {
-    "yes", "y", "yeah", "yep", "yup", "ok", "okay", "sure",
+    "yes", "y", "yeah", "yep", "yup",
     "do it", "go ahead", "apply it", "apply", "confirm",
     "confirm it", "yes please", "please apply",
 }
@@ -93,28 +105,127 @@ _WEEKDAY_NAMES = (
     "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
 )
 
+# Relative day expressions resolved against the REAL current date (offset days).
+# "tonight"/"today" map to today's DATE only -- never an invented clock time.
+_RELATIVE_DAYS = {"tonight": 0, "today": 0, "tomorrow": 1}
+
+# Longer alternatives first so "tonight" wins over "today"/"to".
+_RELATIVE_ALTERNATION = "tonight|tomorrow|today"
+_DATE_ALTERNATION = f"{_WEEKDAY_ALTERNATION}|{_RELATIVE_ALTERNATION}"
+
+# Conversational intents that must NEVER trigger an MCP tool.
+_GREETING_RE = re.compile(
+    r"^(?:hi|hey|hello|hiya|howdy|yo|good\s+(?:morning|afternoon|evening))\b", re.I
+)
+_ACK_WORDS = {
+    "thanks", "thank you", "thankyou", "thx", "ty", "cheers", "ok", "okay", "k",
+    "got it", "gotcha", "alright", "cool", "nice", "great", "awesome", "perfect",
+    "sure", "sure thing", "sounds good", "no problem", "np",
+}
+_CAPABILITY_RE = re.compile(
+    r"what\s+can\s+you\s+do|what\s+do\s+you\s+do|how\s+can\s+you\s+help|"
+    r"what\s+are\s+you\s+(?:able|capable)|your\s+(?:capabilities|features)|"
+    r"^(?:please\s+)?help(?:\s+(?:me|out))?/?$|what\s+should\s+i\s+say|"
+    r"how\s+do\s+i\s+use",
+    re.I,
+)
+# Phrases signalling the user is stating a task, even without a date.
+_COMMIT_LEADIN_RE = re.compile(
+    r"\b(?:i(?:'ve| have| had)?\s+(?:got|have|need|must|want|would\s+like)|"
+    r"i\s+need\s+to|i\s+must|remind\s+me|schedule|add\b|book\b|"
+    r"set\s+(?:a\s+)?reminder|due(?:\s+on)?|appointment|deadline)\b",
+    re.I,
+)
+# Leading words that make a line a *question* (plan/timing/etc.), not a commitment.
+_QUESTION_RE = re.compile(
+    r"^(?:what|when|how|why|who|where|can|could|should|would|will|do|does|did|"
+    r"is|are|am|please|may|might)\b",
+    re.I,
+)
+
 
 def _looks_like_timing(low: str) -> bool:
     return any(re.search(p, low) for p in _TIMING_PATTERNS)
 
 
 def _today() -> date:
-    """Deterministic 'today': DEMO_TODAY if set, else the real local date.
+    """The real current system date.
 
-    Mirrors the fallback used by services so weekday reasoning is consistent.
+    Demo Mode behaves like a real application: every relative-date calculation
+    (today / tonight / tomorrow / weekdays) and the assistant's "as of" line are
+    anchored to ``date.today()`` -- never a fake or fixed demo date. ``DEMO_TODAY``
+    intentionally does NOT influence DemoProvider any more. Tests freeze the
+    clock for determinism.
     """
-    demo = os.environ.get("DEMO_TODAY")
-    if demo:
-        try:
-            return date.fromisoformat(demo.strip())
-        except ValueError:
-            pass
     return date.today()
 
 
 def _next_weekday(from_day: date, target: int) -> date:
     """The upcoming ``target`` weekday (0=Mon) on or after ``from_day``."""
     return from_day + timedelta(days=(target - from_day.weekday()) % 7)
+
+
+def _resolve_date_token(token, base: date):
+    """Resolve a weekday or relative token against the real current date."""
+    if token is None:
+        return None
+    lt = token.lower()
+    if lt in _WEEKDAYS:
+        return _next_weekday(base, _WEEKDAYS[lt])
+    if lt in _RELATIVE_DAYS:
+        return base + timedelta(days=_RELATIVE_DAYS[lt])
+    return None
+
+
+def _find_date_token(text):
+    """First weekday token (preferred) or relative token in ``text``."""
+    rel = None
+    for tok in re.findall(r"[A-Za-z]+", text or ""):
+        lt = tok.lower()
+        if lt in _WEEKDAYS:
+            return tok
+        if rel is None and lt in _RELATIVE_DAYS:
+            rel = tok
+    return rel
+
+
+def _is_question(low: str) -> bool:
+    return (
+        low.endswith("?")
+        or bool(_QUESTION_RE.match(low))
+        or "should i" in low
+        or "what should" in low
+    )
+
+
+def _is_greeting(low: str) -> bool:
+    if not _GREETING_RE.match(low):
+        return False
+    if _find_date_token(low) or _COMMIT_LEADIN_RE.search(low):
+        return False
+    return len(low.split()) <= 5
+
+
+def _is_acknowledgement(low: str) -> bool:
+    return re.sub(r"[^a-z ]", "", low).strip() in _ACK_WORDS
+
+
+def _is_capability(low: str) -> bool:
+    return bool(_CAPABILITY_RE.search(low))
+
+
+def _has_resolvable_date(text) -> bool:
+    return _find_date_token(text) is not None
+
+
+def _commitment_subject(text) -> str:
+    """A best-effort noun phrase for an under-specified commitment."""
+    t = re.sub(r"[?!.]+$", "", (text or "").strip())
+    t = _COMMIT_LEADIN_RE.sub(" ", t)
+    t = re.sub(rf"(?i)\b({_DATE_ALTERNATION})\b", " ", t)
+    t = re.sub(r"(?i)\b(?:to|that|the|a|an|my|for|about)\b", " ", t)
+    t = re.sub(r"\s+", " ", t).strip(" .,-:")
+    return t or "it"
 
 
 def _parse_json(text: str):
@@ -161,11 +272,16 @@ class DemoProvider(LLMProvider):
             return self._timing_followup(executed, names_done)
         if intent == "apply_confirm":
             return self._apply_confirm()
-        return self._final(
-            "Sorry, that request isn't part of the offline demo. I can record "
-            "commitments with due days, tell you what to work on today, or "
-            "propose a replan when a deadline changes."
-        )
+        if intent == "greeting":
+            return self._greeting_reply()
+        if intent == "acknowledgement":
+            return self._acknowledgement_reply()
+        if intent == "capability":
+            return self._capability_reply()
+        if intent == "clarify_commitment":
+            return self._clarify_commitment(req_text)
+        # Unknown input gets a helpful product-oriented reply -- never create_plan.
+        return self._unsupported()
 
     # ------------------------- request parsing --------------------------- #
     @staticmethod
@@ -372,76 +488,138 @@ class DemoProvider(LLMProvider):
             "in the app to confirm it."
         )
 
+    # -------------- conversational / clarification (no tools) ------------ #
+    def _greeting_reply(self):
+        return self._final(
+            "Hi! I'm ActionBridge — I can help you capture commitments, organize "
+            "your plan, check for conflicts, and adjust deadlines. Try saying "
+            "something like \"I have a meeting tomorrow.\""
+        )
+
+    def _acknowledgement_reply(self):
+        return self._final(
+            "Anytime. Add a commitment, ask what to work on today, or tell me "
+            "when a deadline changes and I'll take it from there."
+        )
+
+    def _capability_reply(self):
+        return self._final(
+            "I focus on a few things and do them well:\n"
+            "  - Capture commitments with due days (e.g. \"I have an exam Friday\").\n"
+            "  - Build your plan (\"what should I work on today?\").\n"
+            "  - Check for scheduling conflicts.\n"
+            "  - Propose a replan when a deadline changes (you confirm before it applies).\n"
+            "What would you like to do?"
+        )
+
+    def _clarify_commitment(self, req_text):
+        subject = _commitment_subject(req_text)
+        return self._final(
+            f"Sure — when is {subject}? Give me a day such as tomorrow or a "
+            "weekday and I'll note it down."
+        )
+
+    def _unsupported(self):
+        return self._final(
+            "I'm focused on helping you manage commitments, plans, deadlines, "
+            "and schedule changes. Try telling me something you need to do, "
+            "such as \"I have a meeting tomorrow.\""
+        )
+
     # ----------------------- text-parsing helpers ------------------------ #
     @staticmethod
     def _classify(text: str) -> str:
         low = text.lower().strip()
+        # 1. Deadline-change language stays a replan intent.
         if re.search(r"\b(changed|change|moved|move|rescheduled?|postponed?|pushed?)\b.*\bto\b", low) \
                 or ("deadline" in low and re.search(r"\bto\b", low)):
             return "deadline_change"
-        if low in _CONFIRM_WORDS or any(
-            low == w or re.search(rf"\b{re.escape(w)}\b", low) for w in ("apply", "confirm")
-        ) and not any(w in low for w in ("commitment", "quiz", "assignment", "deadline")):
-            return "apply_confirm"
-        if re.search(rf"\b({_WEEKDAY_ALTERNATION})\b", low) and (
-            re.search(r"\bi (have|need|must|got)|add |schedule |due\b", low)
-            or "," in low or " and " in low
+        # 2. Pure conversational turns -- answered without any tool call.
+        if _is_greeting(low):
+            return "greeting"
+        if _is_acknowledgement(low):
+            return "acknowledgement"
+        if _is_capability(low):
+            return "capability"
+        # 3. Bare confirmation of a pending change (still never applies).
+        if low in _CONFIRM_WORDS or (
+            any(re.search(rf"\b{re.escape(w)}\b", low) for w in ("apply", "confirm", "yes"))
+            and not any(w in low for w in ("commitment", "quiz", "assignment", "deadline"))
         ):
-            return "create_commitments"
-        if re.search(r"\b(today|tonight|plan|prioriti[sz]e|work on|what should|study)\b", low):
-            return "today_plan"
+            return "apply_confirm"
+        # 4. Timing follow-up stays timing (checked before plan/commitment).
         if _looks_like_timing(low):
             return "timing_followup"
-        return "unknown"
+        # 5. A statement carrying a safely resolvable date -> commitment(s).
+        if not _is_question(low) and _has_resolvable_date(low):
+            return "create_commitments"
+        # 6. Looks like a stated task but the date is missing -> ask, don't guess.
+        if not _is_question(low) and _COMMIT_LEADIN_RE.search(low):
+            return "clarify_commitment"
+        # 7. Planning questions / requests.
+        if ("plan" in low) or re.search(
+            r"\b(what\s+should|work\s+on|prioriti[sz]e|study|what\s+do\s+i\s+have|anything\s+today)\b",
+            low,
+        ):
+            return "today_plan"
+        # 8. Anything else -> helpful product reply (never defaults to create_plan).
+        return "unsupported"
 
     @staticmethod
     def _parse_items(text: str) -> list[dict]:
         """Extract dated commitments from a sentence into tool-call inputs."""
-        body = re.sub(r"(?i)^\s*(i(?:'ve)?\s+(?:have|got|need(?:\s+to)?)|add|schedule|new)\s+",
-                      "", text.strip())
+        body = re.sub(
+            r"(?i)^\s*(?:i(?:'ve| have| had)?\s+(?:got|have|need(?:\s+to)?|must|want(?:\s+to)?|"
+            r"would\s+like(?:\s+to)?)|remind\s+me(?:\s+to)?|set\s+(?:a\s+)?reminder(?:\s+to)?|"
+            r"add|schedule|new)\s+",
+            "", text.strip(),
+        )
         # Split on commas, semicolons, and the word "and" between chunks.
         parts = re.split(r",|;|\band\b", body, flags=re.IGNORECASE)
-        items = []
+        base = _today()
+        items: list[dict] = []
+        seen: set[str] = set()
         for chunk in parts:
             c = chunk.strip(" .")
             if not c:
                 continue
-            wd = None
-            for token in re.findall(r"[A-Za-z]+", c):
-                if token.lower() in _WEEKDAYS:
-                    wd = _WEEKDAYS[token.lower()]
-                    break
-            if wd is None:
-                continue  # no day of week -> skip (only handle weekday demo)
-            # Title = the chunk minus the weekday token and leading articles.
-            title = re.sub(rf"(?i)\b({_WEEKDAY_ALTERNATION})\b", "", c).strip(" -,.")
+            token = _find_date_token(c)
+            due = _resolve_date_token(token, base)
+            if due is None:
+                continue  # no safely resolvable day -> skip this chunk
+            # Title = the chunk minus the day token and leading filler.
+            title = re.sub(rf"(?i)\b{re.escape(token)}\b", "", c).strip(" -,.")
             title = re.sub(r"(?i)^(a|an|the|my|due on|due|is|on)\s+", "", title).strip()
-            if not title:
+            if not title or re.sub(r"[^a-z]", "", title.lower()) == re.sub(r"[^a-z]", "", token.lower()):
                 continue
             ctype, priority = "task", None
             for kw, t, p in _TYPE_HINTS:
                 if kw in title.lower():
                     ctype, priority = t, p
                     break
+            key = title.lower()
+            if key in seen:
+                continue
+            seen.add(key)
             items.append({
                 "title": title,
                 "type": ctype,
-                "due_date": _next_weekday(_today(), wd).isoformat(),
+                "due_date": due.isoformat(),
                 "priority": priority,
             })
         return items
 
     @staticmethod
     def _new_due_date(text: str) -> str | None:
-        """The NEW weekday in a '... from X to Y' phrase (or the last weekday)."""
-        m = re.search(rf"(?i)\bto\s+({_WEEKDAY_ALTERNATION})\b", text)
+        """The NEW day in a '... from X to Y' phrase (weekday or relative)."""
+        m = re.search(rf"(?i)\bto\s+({_DATE_ALTERNATION})\b", text)
         token = m.group(1) if m else None
         if token is None:
-            toks = [t for t in re.findall(r"[A-Za-z]+", text) if t.lower() in _WEEKDAYS]
+            toks = [t for t in re.findall(r"[A-Za-z]+", text)
+                    if t.lower() in _WEEKDAYS or t.lower() in _RELATIVE_DAYS]
             token = toks[-1] if toks else None
-        if token is None:
-            return None
-        return _next_weekday(_today(), _WEEKDAYS[token.lower()]).isoformat()
+        due = _resolve_date_token(token, _today())
+        return due.isoformat() if due else None
 
     @staticmethod
     def _change_target(text: str) -> str | None:
