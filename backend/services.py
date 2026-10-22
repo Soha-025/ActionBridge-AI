@@ -312,27 +312,50 @@ def detect_conflicts(commitment_id: int, new_due_date: str) -> dict:
 def _compute_proposal(commitment: dict, new_due_date: str, conflicts: list[dict]) -> dict:
     """Build the deterministic pending diff for a replan.
 
-    * The primary commitment moves old -> new due date.
-    * Any same-day collision is rebalanced to the next free calendar day.
+    Correctness invariant: a commitment is NEVER scheduled after its due date
+    (``planned_date <= due_date``). The plan rebuild always sets
+    ``planned_date == due_date``, so the only thing that can break the rule is
+    the date this proposal assigns to a displaced commitment.
+
+    * The primary commitment moves old -> new due date (exactly what the user
+      asked for); it is never itself rebalanced.
+    * A same-day collision is rebalanced to the nearest free day ON OR BEFORE
+      its own deadline (searching backwards, floored at today). A displaced
+      commitment is never pushed LATER than the deadline it already has.
+    * If no free day exists at or before a colliding commitment's deadline, it
+      is left where it is and the pressure is reported honestly -- we do NOT
+      resolve a conflict by scheduling work after a deadline.
     * tight_week pressure is explained in the summary but needs no automatic
       move (the user is pulling work earlier on purpose).
     """
     target = _validate_date(new_due_date, "new_due_date")
+    today = _today()
+    primary_id = commitment["id"]
     moved = []
+    blocked = []
     taken = {
         c["due_date"]
-        for c in _all_active_excluding(commitment["id"])
+        for c in _all_active_excluding(primary_id)
     }
     taken.discard(commitment["due_date"])  # old date frees up
+    taken.add(new_due_date)                # the moved commitment now occupies this day
 
     for conflict in conflicts:
         if conflict["type"] != "collision":
             continue
         cid = conflict["commitment_id"]
-        # find earliest free day at or after the target date
-        candidate = target
-        while candidate.isoformat() in taken:
-            candidate += timedelta(days=1)
+        if cid == primary_id:
+            continue  # never rebalance the commitment the user is moving
+        deadline = _validate_date(conflict["due_date"], "due_date")
+        # Rebalance EARLIER: the nearest free day on/before this commitment's
+        # own deadline, never after it, and never before today.
+        candidate = deadline
+        while candidate.isoformat() in taken and candidate > today:
+            candidate -= timedelta(days=1)
+        if candidate.isoformat() in taken or candidate < today or candidate > deadline:
+            # No room at or before the deadline -> leave it, report the pressure.
+            blocked.append(conflict)
+            continue
         taken.add(candidate.isoformat())
         moved.append(
             {
@@ -340,7 +363,7 @@ def _compute_proposal(commitment: dict, new_due_date: str, conflicts: list[dict]
                 "title": conflict["title"],
                 "from": conflict["due_date"],
                 "to": candidate.isoformat(),
-                "reason": "rebalanced off the moved commitment's new date",
+                "reason": "rebalanced to the nearest free day on or before its deadline",
             }
         )
 
@@ -355,6 +378,13 @@ def _compute_proposal(commitment: dict, new_due_date: str, conflicts: list[dict]
         if moved:
             summary += "; rebalanced: " + ", ".join(
                 f"'{m['title']}' -> {m['to']}" for m in moved
+            )
+        if blocked:
+            bnames = ", ".join(f"'{c['title']}'" for c in blocked)
+            summary += (
+                f"; {bnames} could not be moved to a free day on or before its "
+                "deadline, so its date is left unchanged (no work is scheduled "
+                "after a deadline)"
             )
         if tight:
             summary += ". Work must start earlier to absorb the change."

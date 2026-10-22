@@ -178,6 +178,32 @@ def test_pending_change_id_matches_real_propose_replan_result(tmp_db, monkeypatc
     assert captured["change_id"] == result["pending_change_id"]
 
 
+def test_deadline_change_never_schedules_after_new_deadline(tmp_db_oct22):
+    # Physical-QA reproduction: today Thu 2026-10-22, an 'AI assignment' due
+    # Friday 2026-10-23 is moved to Wednesday 2026-10-28 while other work
+    # already collides on 2026-10-28. No rebalanced commitment (and never the
+    # moved one) may end up scheduled AFTER its deadline.
+    services.create_commitment("AI assignment", "assignment", "2026-10-23", "high")
+    services.create_commitment("AI assignment", "assignment", "2026-10-28", "high")
+    services.create_commitment("Statistics quiz", "quiz", "2026-10-28", "high")
+
+    result = chat("My AI assignment deadline changed from Friday to Wednesday.")
+    assert result["pending_change_id"], "expected a pending change"
+    change = services.get_change(result["pending_change_id"])
+    assert change["new_due_date"] == "2026-10-28"
+
+    # State is unchanged until Apply (requirement E).
+    deadlines = {c["id"]: c["due_date"]
+                 for c in services.get_commitments()["commitments"]}
+    assert deadlines[change["commitment_id"]] == "2026-10-23"
+
+    # The moved commitment is never itself rebalanced...
+    assert all(m["commitment_id"] != change["commitment_id"] for m in change["moved"])
+    # ...and no displaced commitment is scheduled after its own deadline.
+    for m in change["moved"]:
+        assert m["to"] <= deadlines[m["commitment_id"]]
+
+
 # ---------------------------------------------------------------------------
 # D. "Apply it" must NOT apply anything
 # ---------------------------------------------------------------------------
@@ -565,3 +591,234 @@ def test_plan_as_of_line_uses_real_today(tmp_db_oct22):
     text = plan["reply"].replace("**", "")
     assert f"as of {OCT22}" in text
     assert "2026-10-26" not in text  # the old fake DEMO_TODAY must not leak
+
+
+# ==========================================================================
+# H. CLARIFICATION CONTEXT + COMMON TYPOS (multi-turn, per session)
+# ==========================================================================
+# These mirror exactly what backend/main.py now sends: a bounded per-session
+# message history (prior user text + prior assistant reply) followed by the
+# current turn. A single agent/provider instance is reused across the turns of
+# one conversation; separate histories model separate sessions.
+
+
+def _turn(agent, history, text):
+    """Run one turn against the shared history, the way main.py does."""
+    messages = [*history, {"role": "user", "content": [{"text": text}]}]
+    result = asyncio.run(agent.chat(messages))
+    history.append({"role": "user", "content": [{"text": text}]})
+    if result.get("reply"):
+        history.append({"role": "assistant", "content": [{"text": result["reply"]}]})
+    return result
+
+
+def _new_conversation():
+    return ActionBridgeAgent(DemoProvider()), []
+
+
+def test_clarification_bare_weekday_completes_commitment(tmp_db):
+    agent, hist = _new_conversation()
+    first = _turn(agent, hist, "I have lunch")
+    # First turn asks for a date and stores nothing.
+    assert first["tool_calls"] == []
+    assert "when" in first["reply"].lower()
+    assert services.get_commitments()["commitments"] == []
+
+    second = _turn(agent, hist, "Friday")
+    assert "create_commitment" in _titles(second)
+    assert _due("lunch") == FRI  # upcoming Friday from Mon 2026-10-26
+
+
+def test_clarification_bare_tomorrow_completes_commitment(tmp_db):
+    agent, hist = _new_conversation()
+    _turn(agent, hist, "I have a meeting")
+    second = _turn(agent, hist, "tomorrow")
+    assert "create_commitment" in _titles(second)
+    assert _due("meeting") == NEXT_DAY  # 2026-10-27
+
+
+def test_clarification_dentist_appointment_keeps_subject(tmp_db):
+    agent, hist = _new_conversation()
+    _turn(agent, hist, "dentist appointment")
+    second = _turn(agent, hist, "tomorrow")
+    assert "create_commitment" in _titles(second)
+    assert _due("dentist appointment") == NEXT_DAY
+
+
+def test_common_typo_tommorrow_resolves_directly(tmp_db):
+    # "I have lunch tommorrow" is understood without an awkward clarification.
+    result = chat("I have lunch tommorrow")
+    assert "create_commitment" in _titles(result)
+    assert _due("lunch") == NEXT_DAY
+    # The reply must not echo the misspelling back as a question.
+    assert "tommorrow" not in result["reply"]
+
+
+@pytest.mark.parametrize("typo", ["tommorrow", "tommorow", "tomorow", "tomarrow"])
+def test_typo_variants_all_resolve_to_tomorrow(tmp_db, typo):
+    result = chat(f"I have gym {typo}")
+    assert "create_commitment" in _titles(result)
+    assert _due("gym") == NEXT_DAY
+
+
+def test_standalone_weekday_without_pending_invents_nothing(tmp_db):
+    # A lone "Friday" with no prior clarification must NOT create a commitment.
+    result = chat("Friday")
+    assert "create_commitment" not in _titles(result)
+    assert services.get_commitments()["commitments"] == []
+
+
+def test_bare_date_after_completed_request_does_not_reuse(tmp_db):
+    # After a commitment is actually created, a later bare weekday must not be
+    # folded back into it or invent a new one.
+    agent, hist = _new_conversation()
+    _turn(agent, hist, "I have lunch Friday")          # created immediately
+    assert _due("lunch") == FRI
+    before = _created_titles()
+    _turn(agent, hist, "Monday")                        # no pending clarification
+    assert _created_titles() == before                  # nothing new invented
+
+
+def test_clarification_context_is_per_session(tmp_db):
+    # Session A asks for a date; session B (its own history) answering a bare
+    # day must not complete A's pending commitment.
+    agent_a, hist_a = _new_conversation()
+    _turn(agent_a, hist_a, "I have lunch")
+
+    agent_b, hist_b = _new_conversation()
+    result_b = _turn(agent_b, hist_b, "Friday")
+    assert "create_commitment" not in _titles(result_b)
+    assert services.get_commitments()["commitments"] == []  # B invented nothing
+
+    # A can still finish its own clarification.
+    result_a = _turn(agent_a, hist_a, "Friday")
+    assert _due("lunch") == FRI
+
+
+def test_clarification_uses_only_safe_tools(tmp_db, monkeypatch):
+    def boom(*a, **k):  # pragma: no cover - must never run
+        raise AssertionError("apply_changes must be unreachable from chat")
+
+    monkeypatch.setattr(services, "apply_changes", boom)
+    agent, hist = _new_conversation()
+    _turn(agent, hist, "I have lunch")
+    second = _turn(agent, hist, "Friday")
+    assert _titles(second) <= ALLOWED
+
+
+def test_demo_flow_still_works_with_history(tmp_db):
+    # The exact hackathon opener still parses into three commitments even when
+    # driven through the new history-carrying path.
+    agent, hist = _new_conversation()
+    result = _turn(
+        agent, hist,
+        "I have a Statistics quiz Thursday, an AI assignment Friday and a "
+        "presentation Saturday.",
+    )
+    assert [tc["name"] for tc in result["tool_calls"]].count("create_commitment") == 3
+    assert _created_titles() == {"Statistics quiz", "AI assignment", "presentation"}
+
+
+# ==================== EXPLICIT CALENDAR DATES ============================= #
+# DemoProvider must understand common explicit date formats (not only today /
+# tonight / tomorrow / weekdays), resolve the year against the REAL current
+# date, reject impossible dates naturally, and strip date syntax out of the
+# commitment title -- all without a heavy third-party date library.
+# Frozen base here is Mon 2026-10-26 (FROZEN_TODAY), so 31 Oct is still
+# upcoming this year -> 2026-10-31.
+OCT31 = "2026-10-31"   # upcoming relative to the frozen base 2026-10-26
+OCT31_NEXT = "2027-10-31"
+PASSED_OCT = "2027-10-10"  # "10 oct" already passed in 2026 -> next occurrence
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    ["31 oct", "31 Oct", "31-oct", "31 oct 26", "31 oct 2026",
+     "31 October 2026", "31/10/2026", "31/10/26"],
+)
+def test_explicit_date_formats_resolve(tmp_db, phrase):
+    agent = ActionBridgeAgent(DemoProvider())
+    result = asyncio.run(agent.chat([
+        {"role": "user", "content": [{"text":
+            f"I have project submission on {phrase}"}]}]))
+    inputs = [tc["input"] for tc in result["tool_calls"]
+              if tc["name"] == "create_commitment"]
+    assert len(inputs) == 1
+    # Date syntax (and the dangling 'on') must be stripped from the title.
+    assert inputs[0]["title"] == "project submission"
+    assert inputs[0]["due_date"] == OCT31
+    assert _due("project submission") == OCT31
+
+
+def test_explicit_date_two_digit_year_and_yearless(tmp_db):
+    # No year -> next occurrence this year (still upcoming -> 2026-10-31).
+    assert demo_provider._parse_explicit_date(
+        "31 oct", date(2026, 10, 26))[1][0] == date(2026, 10, 31)
+    # Already passed this year -> rolls to next year.
+    assert demo_provider._parse_explicit_date(
+        "10 oct", date(2026, 10, 26))[1][0] == date(2027, 10, 10)
+    # Explicit 2-digit year used as-is even though it is in the past year-wise.
+    assert demo_provider._parse_explicit_date(
+        "31 oct 26", date(2026, 10, 26))[1][0] == date(2026, 10, 31)
+
+
+def test_no_year_past_date_creates_next_occurrence(tmp_db):
+    agent = ActionBridgeAgent(DemoProvider())
+    asyncio.run(agent.chat([
+        {"role": "user", "content": [{"text": "I have renewal on 10 oct"}]}]))
+    assert _due("renewal") == PASSED_OCT
+
+
+@pytest.mark.parametrize("phrase", ["31 February", "32 Oct", "31/02/2026"])
+def test_impossible_date_is_rejected_naturally(tmp_db, phrase):
+    agent = ActionBridgeAgent(DemoProvider())
+    result = asyncio.run(agent.chat([
+        {"role": "user", "content": [{"text": f"I have party on {phrase}"}]}]))
+    # No commitment tool is emitted and we explain the date is not real.
+    assert all(tc["name"] != "create_commitment" for tc in result["tool_calls"])
+    assert _created_titles() == set()
+    assert "real date" in result["reply"].lower()
+
+
+def test_explicit_date_clarification_completes_commitment(tmp_db):
+    agent, hist = _new_conversation()
+    first = _turn(agent, hist, "I have project submission")
+    assert "when" in first["reply"].lower()
+    assert _created_titles() == set()
+    second = _turn(agent, hist, "31 oct 26")
+    assert _due("project submission") == OCT31
+
+
+def test_standalone_explicit_date_without_pending_invents_nothing(tmp_db):
+    agent, hist = _new_conversation()
+    result = _turn(agent, hist, "31 oct 26")
+    assert _created_titles() == set()
+    assert all(tc["name"] != "create_commitment" for tc in result["tool_calls"])
+
+
+def test_explicit_date_clarification_is_per_session(tmp_db):
+    agent_a, hist_a = _new_conversation()
+    _turn(agent_a, hist_a, "I have project submission")
+    agent_b, hist_b = _new_conversation()          # fresh, independent history
+    result_b = _turn(agent_b, hist_b, "31 oct 26")
+    assert _created_titles() == set()             # A's pending never leaks into B
+    _turn(agent_a, hist_a, "31 oct 26")
+    assert _due("project submission") == OCT31     # A still completes correctly
+
+
+def test_tomorrow_and_typo_still_resolve(tmp_db):
+    agent, hist = _new_conversation()
+    assert _due_is(_turn(agent, hist, "I have lunch tomorrow"), "2026-10-27")
+    assert _due_is(_turn(agent, hist, "I have coffee tommorrow"), "2026-10-27")
+
+
+def _due_is(result, iso):
+    return any(tc["input"].get("due_date") == iso
+               for tc in result.get("tool_calls", []) if tc["name"] == "create_commitment")
+
+
+def test_weekday_parsing_unchanged(tmp_db):
+    agent = ActionBridgeAgent(DemoProvider())
+    asyncio.run(agent.chat([
+        {"role": "user", "content": [{"text": "I have a quiz Friday"}]}]))
+    assert _due("quiz") == FRI

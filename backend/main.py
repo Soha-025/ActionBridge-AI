@@ -66,6 +66,26 @@ class ChatRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Per-session conversation history (in-memory, bounded).
+#
+# The agent already understands a full Bedrock-format message list; the caller
+# owns persistence. We keep only the last few text turns PER SESSION so a
+# follow-up that supplies just a missing detail (e.g. answering "Friday" to
+# "when is lunch?") can complete the previous request. Keyed by session_id, so
+# one session never leaks its pending context into another. This adds no new
+# capability to the model path -- the same five safe tools and the human-only
+# Apply/Cancel boundary are unchanged.
+# ---------------------------------------------------------------------------
+
+_MAX_HISTORY_MESSAGES = 8
+_SESSION_HISTORY: dict[str, "list[dict]"] = {}
+
+
+def _session_history(session_id: str) -> list[dict]:
+    return _SESSION_HISTORY.setdefault(session_id, [])
+
+
+# ---------------------------------------------------------------------------
 # Lazy agent/provider construction.
 #
 # Building the agent touches AWS configuration, so it MUST NOT happen at
@@ -148,19 +168,28 @@ def _not_found_or_http(value_error: ValueError, *, not_pending_status: int | Non
 async def chat_endpoint(payload: ChatRequest):
     """Run one conversational turn through the agent.
 
-    The request contract only carries a single user message (plus a session id,
-    which is not persisted in this step), so it is converted into the Bedrock
-    message format the agent expects.
+    The request carries a single user message plus a session id. We attach the
+    session's recent (bounded) text history so the agent can resolve short
+    follow-up answers such as a bare weekday that completes an earlier
+    clarification, then convert the current message into the Bedrock format.
     """
-    messages = [
-        {"role": "user", "content": [{"text": payload.text}]},
-    ]
+    history = _session_history(payload.session_id)
+    current = {"role": "user", "content": [{"text": payload.text}]}
+    messages = [*history, current]
     try:
         agent = get_agent()
         result = await agent.chat(messages)
+        # Record this successful exchange (user turn + assistant reply) so the
+        # next turn can build on it; keep the per-session window bounded.
+        reply = result.get("reply", "")
+        history.append(current)
+        if reply:
+            history.append({"role": "assistant", "content": [{"text": reply}]})
+        if len(history) > _MAX_HISTORY_MESSAGES:
+            del history[: len(history) - _MAX_HISTORY_MESSAGES]
         # Normalize to the guaranteed frontend shape.
         return {
-            "reply": result.get("reply", ""),
+            "reply": reply,
             "pending_change_id": result.get("pending_change_id"),
             "tool_calls": result.get("tool_calls", []),
         }

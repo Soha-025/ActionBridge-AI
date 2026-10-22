@@ -249,7 +249,69 @@ def test_propose_replan_collision_rebalances(tmp_db):
     proposal = services.propose_replan(essay["commitment"]["id"], "2026-10-31")
     moved = proposal["diff"]["moved"]
     assert len(moved) == 1
-    assert moved[0]["to"] == "2026-11-01"  # pushed to next free day
+    # The displaced commitment is rebalanced to an earlier free day that is ON
+    # OR BEFORE its own deadline -- never after it (planned_date <= due_date).
+    assert moved[0]["to"] == "2026-10-30"
+    assert moved[0]["to"] <= "2026-10-31"  # its deadline
+
+
+def test_propose_replan_never_schedules_after_deadline(tmp_db):
+    # Core regression for the physical-QA bug: a colliding commitment must
+    # never be rebalanced to a date later than its own due date.
+    _make("Tight", "school", "2026-10-31")
+    mover = _make("Mover", "school", "2026-10-20")
+    proposal = services.propose_replan(mover["commitment"]["id"], "2026-10-31")
+    deadlines = {"Tight": "2026-10-31"}
+    for m in proposal["diff"]["moved"]:
+        assert m["to"] <= deadlines[m["title"]]
+
+
+def test_propose_replan_reports_pressure_without_late_move(tmp_db, monkeypatch):
+    # No free day at/before the colliding deadline -> leave it and report the
+    # pressure honestly instead of scheduling it after its deadline. Clock is
+    # frozen so the packed window is deterministic regardless of the real date.
+    from datetime import date
+
+    monkeypatch.setattr(services, "_today", lambda: date(2026, 10, 26))
+    colliding = _make("Collide", "school", "2026-10-31")
+    for day in range(26, 31):  # 2026-10-26 .. 2026-10-30 all taken
+        _make(f"Fill{day}", "school", f"2026-10-{day}")
+    primary = _make("Primary", "school", "2026-10-15")
+    proposal = services.propose_replan(primary["commitment"]["id"], "2026-10-31")
+    # 'Collide' (deadline 2026-10-31) is squeezed out by the primary and cannot
+    # be rebalanced earlier, so it is left in place and flagged as blocked.
+    assert all(m["commitment_id"] != colliding["commitment"]["id"]
+               for m in proposal["diff"]["moved"])
+    assert "Collide" in proposal["summary"]
+    assert "left unchanged" in proposal["summary"]
+    assert "after a deadline" in proposal["summary"]
+
+
+def test_replan_earlier_deadline_moves_partner_on_or_before(tmp_db, monkeypatch):
+    # Requirement C: a commitment moving from a LATER to an EARLIER deadline
+    # must relocate the affected (colliding) work on/before the new deadline.
+    from datetime import date
+
+    monkeypatch.setattr(services, "_today", lambda: date(2026, 10, 20))
+    tight = _make("Tight", "school", "2026-10-28")
+    mover = _make("Mover", "school", "2026-10-31")  # later -> moved earlier
+    proposal = services.propose_replan(mover["commitment"]["id"], "2026-10-28")
+    assert len(proposal["diff"]["moved"]) == 1
+    for m in proposal["diff"]["moved"]:
+        assert m["commitment_id"] == tight["commitment"]["id"]
+        assert m["to"] <= "2026-10-28"  # on/before the new deadline & its own
+
+
+def test_apply_plan_items_never_after_their_due_date(tmp_db):
+    # Requirement A: after applying, no plan item is scheduled after its
+    # commitment's (new) due date.
+    pres = _make("Presentation", "school", "2026-10-31")
+    essay = _make("Essay", "school", "2026-10-28")
+    proposal = services.propose_replan(essay["commitment"]["id"], "2026-10-31")
+    applied = services.apply_changes(proposal["change_id"])
+    due_by_id = {c["id"]: c["due_date"] for c in services.get_commitments()["commitments"]}
+    for p in applied["plan_items"]:
+        assert p["planned_date"] <= due_by_id[p["commitment_id"]]
 
 
 def test_propose_replan_unknown_commitment(tmp_db):
@@ -323,7 +385,9 @@ def test_apply_changes_rebuilds_plan_with_moves(tmp_db):
 
     dates = {c["id"]: c["due_date"] for c in services.get_commitments()["commitments"]}
     assert dates[essay["commitment"]["id"]] == "2026-10-31"
-    assert dates[pres["commitment"]["id"]] == "2026-11-01"  # rebalanced move applied
+    # Rebalanced move applied: Presentation shifts EARLIER, on/before its own
+    # 2026-10-31 deadline (never pushed later than a deadline).
+    assert dates[pres["commitment"]["id"]] == "2026-10-30"
 
 
 def test_apply_changes_unknown(tmp_db):

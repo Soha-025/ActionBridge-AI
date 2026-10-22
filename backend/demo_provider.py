@@ -109,9 +109,40 @@ _WEEKDAY_NAMES = (
 # "tonight"/"today" map to today's DATE only -- never an invented clock time.
 _RELATIVE_DAYS = {"tonight": 0, "today": 0, "tomorrow": 1}
 
+# Common misspellings mapped to their canonical relative token, so a typo like
+# "tommorrow" is understood as "tomorrow" instead of triggering an awkward
+# clarification that just echoes the misspelling back at the user.
+_RELATIVE_ALIASES = {
+    "tommorrow": "tomorrow", "tommorow": "tomorrow", "tomorow": "tomorrow",
+    "tomorwo": "tomorrow", "tomarrow": "tomorrow", "tomoroww": "tomorrow",
+    "todya": "today", "tonie": "tonight", "tonite": "tonight",
+}
+
+# token -> offset days, including the accepted misspellings. This is the single
+# lookup every date routine uses so a typo resolves everywhere consistently.
+_RELATIVE_OFFSETS = dict(_RELATIVE_DAYS)
+for _alias, _canon in _RELATIVE_ALIASES.items():
+    _RELATIVE_OFFSETS[_alias] = _RELATIVE_DAYS[_canon]
+
 # Longer alternatives first so "tonight" wins over "today"/"to".
-_RELATIVE_ALTERNATION = "tonight|tomorrow|today"
+_RELATIVE_ALTERNATION = "|".join(sorted(_RELATIVE_OFFSETS, key=len, reverse=True))
 _DATE_ALTERNATION = f"{_WEEKDAY_ALTERNATION}|{_RELATIVE_ALTERNATION}"
+
+# Explicit calendar dates (day-first), parsed deterministically with the stdlib
+# ``date`` for validation -- no third-party date library. Covers "31 oct",
+# "31 Oct", "31 October 2026", "31-oct", "31-oct-2026", "31 oct 26",
+# "31/10/2026" and "31/10/26".
+_MONTHS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9, "oct": 10,
+    "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+_EXPLICIT_DATE_RE = re.compile(
+    r"(?<!\d)(\d{1,2})[\s\-/\.]+(\d{1,2}|[A-Za-z]{3,9})"
+    r"(?:[\s\-/\.]+(\d{2,4})(?!\d))?",
+    re.IGNORECASE,
+)
 
 # Conversational intents that must NEVER trigger an MCP tool.
 _GREETING_RE = re.compile(
@@ -172,8 +203,8 @@ def _resolve_date_token(token, base: date):
     lt = token.lower()
     if lt in _WEEKDAYS:
         return _next_weekday(base, _WEEKDAYS[lt])
-    if lt in _RELATIVE_DAYS:
-        return base + timedelta(days=_RELATIVE_DAYS[lt])
+    if lt in _RELATIVE_OFFSETS:
+        return base + timedelta(days=_RELATIVE_OFFSETS[lt])
     return None
 
 
@@ -184,9 +215,59 @@ def _find_date_token(text):
         lt = tok.lower()
         if lt in _WEEKDAYS:
             return tok
-        if rel is None and lt in _RELATIVE_DAYS:
+        if rel is None and lt in _RELATIVE_OFFSETS:
             rel = tok
     return rel
+
+
+def _parse_explicit_date(text, base: date):
+    """Detect a day-first explicit calendar date in ``text``.
+
+    Returns one of:
+      * ``("ok", (date_obj, matched_text))`` -- a valid, resolved date.
+      * ``("invalid", matched_text)``        -- looks like a date but impossible
+        (e.g. "31 February", "32 Oct"), so the caller can reject it naturally
+        instead of silently storing a bad commitment.
+      * ``("none", None)``                   -- no explicit-date pattern present.
+
+    Year rule: an explicit year (2- or 4-digit) is used as given; when omitted
+    the date resolves to its next occurrence on/after ``base`` (the real current
+    date). ``base`` is never assumed to be a fixed year -- nothing is hardcoded.
+    """
+    for m in _EXPLICIT_DATE_RE.finditer(text or ""):
+        day = int(m.group(1))
+        mon_raw = m.group(2)
+        year_raw = m.group(3)
+        matched = m.group(0)
+        if mon_raw.isdigit():
+            month = int(mon_raw)
+            if not 1 <= month <= 12:
+                return ("invalid", matched)
+        else:
+            key = mon_raw.lower().rstrip(".")
+            month = _MONTHS.get(key)
+            if month is None and key[:3] in _MONTHS:
+                month = _MONTHS[key[:3]]
+            if month is None:
+                continue  # letters that are not a month name -> not a date
+        if year_raw:
+            y = int(year_raw)
+            if y < 100:
+                y += 2000
+            try:
+                return ("ok", (date(y, month, day), matched))
+            except ValueError:
+                return ("invalid", matched)
+        # No year supplied: first real occurrence on/after today (handles leap).
+        for delta in range(0, 9):
+            try:
+                cand = date(base.year + delta, month, day)
+            except ValueError:
+                continue
+            if cand >= base:
+                return ("ok", (cand, matched))
+        return ("invalid", matched)
+    return ("none", None)
 
 
 def _is_question(low: str) -> bool:
@@ -215,7 +296,10 @@ def _is_capability(low: str) -> bool:
 
 
 def _has_resolvable_date(text) -> bool:
-    return _find_date_token(text) is not None
+    if _find_date_token(text) is not None:
+        return True
+    status, _ = _parse_explicit_date(text, _today())
+    return status in ("ok", "invalid")
 
 
 def _commitment_subject(text) -> str:
@@ -257,6 +341,12 @@ class DemoProvider(LLMProvider):
             return self._final("I did not catch a request. Try adding "
                                "commitments, asking what to work on today, or "
                                "changing a deadline.")
+
+        # If this turn only supplies a date (e.g. answering "Friday" to an
+        # earlier "when is <thing>?" clarification), fold it back into the
+        # pending request so the commitment is completed instead of being read
+        # as an unrelated standalone message.
+        req_text = self._complete_clarification(messages, req_idx, req_text)
 
         executed = self._executed(messages, req_idx)
         names_done = {e["name"] for e in executed}
@@ -330,8 +420,72 @@ class DemoProvider(LLMProvider):
                         target["result"] = _parse_json(text)
         return ordered
 
+    @staticmethod
+    def _text_of(msg) -> str:
+        """Join the plain-text blocks of a message into one string."""
+        parts = [
+            (block.get("text") or "").strip()
+            for block in (msg.get("content") or [])
+            if isinstance(block, dict) and "text" in block
+        ]
+        return " ".join(p for p in parts if p).strip()
+
+    def _complete_clarification(self, messages, req_idx, req_text):
+        """Fold a bare date answer back into the request it clarifies.
+
+        When the assistant has just asked for a missing date (an under-
+        specified commitment such as "I have lunch"), the user's next turn is
+        often only a day -- "Friday", "tomorrow", even a misspelling. On its
+        own that looks like a subject-less commitment and fails. Here we detect
+        a *bare* date answer whose immediately-preceding turn was a request that
+        would have triggered a clarification, and return the two combined so the
+        existing parser records the commitment. Any other turn is returned
+        unchanged, so a lone "Friday" with no pending clarification never
+        invents a commitment. Because it reads only the caller-supplied
+        conversation, it keeps no cross-session state of its own.
+        """
+        core = (req_text or "").strip().strip("?.,! ").strip()
+        if not core:
+            return req_text
+        # A bare answer is ONLY a date -- weekday/relative word or explicit
+        # calendar date -- with no other words left over.
+        status, info = _parse_explicit_date(core, _today())
+        if status == "ok":
+            residue = core.replace(info[1], " ")
+        elif status == "invalid":
+            return req_text  # let the normal flow reject the impossible date
+        else:
+            if _find_date_token(core) is None:
+                return req_text
+            residue = re.sub(rf"(?i)\b({_DATE_ALTERNATION})\b", " ", core)
+        if re.search(r"[A-Za-z]", residue):
+            return req_text
+
+        prev_assistant = messages[req_idx - 1] if req_idx - 1 >= 0 else None
+        pending_user = messages[req_idx - 2] if req_idx - 2 >= 0 else None
+        if not prev_assistant or prev_assistant.get("role") != "assistant":
+            return req_text
+        if not pending_user or pending_user.get("role") != "user":
+            return req_text
+
+        prior_text = self._text_of(pending_user)
+        if not prior_text:
+            return req_text
+        # Complete it only if that earlier turn really was a date-less
+        # commitment that made us ask -- not an already-actioned request.
+        if self._classify(prior_text.lower().strip()) != "clarify_commitment":
+            return req_text
+        return f"{prior_text} {core}"
+
     # --------------------------- intents --------------------------------- #
     def _create_commitments(self, req_text, executed, names_done):
+        if "create_commitment" not in names_done:
+            status, info = _parse_explicit_date(req_text, _today())
+            if status == "invalid":
+                return self._final(
+                    f"'{info}' doesn't look like a real date \u2014 please give me "
+                    "a valid day (for example '31 Oct' or '31/10/2026')."
+                )
         items = self._parse_items(req_text)
         if not items:
             return self._final("I couldn't identify any dated commitments in "
@@ -583,14 +737,26 @@ class DemoProvider(LLMProvider):
             c = chunk.strip(" .")
             if not c:
                 continue
-            token = _find_date_token(c)
-            due = _resolve_date_token(token, base)
-            if due is None:
-                continue  # no safely resolvable day -> skip this chunk
-            # Title = the chunk minus the day token and leading filler.
-            title = re.sub(rf"(?i)\b{re.escape(token)}\b", "", c).strip(" -,.")
+            status, info = _parse_explicit_date(c, base)
+            if status == "ok":
+                due, matched = info
+                # Drop the whole date phrase plus any dangling preposition so
+                # "project submission on 31-oct" yields a clean "project submission".
+                title = c.replace(matched, " ")
+                title = re.sub(r"(?i)\b(?:on|of|by|due|the)\b", " ", title)
+            elif status == "invalid":
+                continue  # impossible date; the turn is rejected upstream
+            else:
+                token = _find_date_token(c)
+                due = _resolve_date_token(token, base)
+                if due is None:
+                    continue  # no safely resolvable day -> skip this chunk
+                # Title = the chunk minus the day token and leading filler.
+                title = re.sub(rf"(?i)\b{re.escape(token)}\b", "", c)
+            title = re.sub(r"\s+", " ", title).strip(" -,.:/")
             title = re.sub(r"(?i)^(a|an|the|my|due on|due|is|on)\s+", "", title).strip()
-            if not title or re.sub(r"[^a-z]", "", title.lower()) == re.sub(r"[^a-z]", "", token.lower()):
+            guard = _find_date_token(c)
+            if not title or (guard and re.sub(r"[^a-z]", "", title.lower()) == re.sub(r"[^a-z]", "", guard.lower())):
                 continue
             ctype, priority = "task", None
             for kw, t, p in _TYPE_HINTS:
@@ -616,7 +782,7 @@ class DemoProvider(LLMProvider):
         token = m.group(1) if m else None
         if token is None:
             toks = [t for t in re.findall(r"[A-Za-z]+", text)
-                    if t.lower() in _WEEKDAYS or t.lower() in _RELATIVE_DAYS]
+                    if t.lower() in _WEEKDAYS or t.lower() in _RELATIVE_OFFSETS]
             token = toks[-1] if toks else None
         due = _resolve_date_token(token, _today())
         return due.isoformat() if due else None

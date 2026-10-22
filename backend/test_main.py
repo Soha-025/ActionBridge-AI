@@ -42,6 +42,14 @@ def client():
         yield c
 
 
+@pytest.fixture(autouse=True)
+def _isolate_sessions():
+    """Reset per-session chat history so tests never inherit each other's turns."""
+    main._SESSION_HISTORY.clear()
+    yield
+    main._SESSION_HISTORY.clear()
+
+
 class FakeAgent:
     """Stands in for ActionBridgeAgent; records messages, returns a canned dict."""
 
@@ -315,3 +323,84 @@ def test_cors_preflight_allows_frontend(client):
     # rather than '*'; either way CORS is still functioning for the frontend.
     assert r.headers.get("access-control-allow-origin") in (origin, "*")
     assert r.headers.get("access-control-allow-credentials") == "true"
+
+
+# ---------------------------------------------------------------------------
+# 16. Per-session clarification context through the REAL endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_chat_clarification_is_scoped_per_session(tmp_db, client, monkeypatch):
+    from datetime import date
+
+    import demo_provider
+    from agent import ActionBridgeAgent
+    from demo_provider import DemoProvider
+
+    # Freeze the provider clock (Mon 2026-10-26 -> upcoming Friday is 10-30).
+    monkeypatch.setattr(demo_provider, "_today", lambda: date(2026, 10, 26))
+    monkeypatch.setattr(main, "get_agent", lambda: ActionBridgeAgent(DemoProvider()))
+
+    # Session A states a date-less commitment; the assistant asks for a day.
+    a1 = client.post("/api/chat", json={"session_id": "A", "text": "I have lunch"}).json()
+    assert a1["tool_calls"] == []
+    assert "when" in a1["reply"].lower()
+
+    # Session B has no pending clarification, so a bare "Friday" invents nothing.
+    b1 = client.post("/api/chat", json={"session_id": "B", "text": "Friday"}).json()
+    assert "create_commitment" not in {tc["name"] for tc in b1["tool_calls"]}
+    assert services.get_commitments()["commitments"] == []
+
+    # Session A completing its own clarification creates the lunch commitment.
+    a2 = client.post("/api/chat", json={"session_id": "A", "text": "Friday"}).json()
+    assert "create_commitment" in {tc["name"] for tc in a2["tool_calls"]}
+    stored = services.get_commitments()["commitments"]
+    assert {c["title"] for c in stored} == {"lunch"}
+    assert stored[0]["due_date"] == "2026-10-30"
+
+
+def test_chat_explicit_date_clarification_and_isolation(tmp_db, client, monkeypatch):
+    from datetime import date
+
+    import demo_provider
+    from agent import ActionBridgeAgent
+    from demo_provider import DemoProvider
+
+    # Freeze the provider clock (Mon 2026-10-26; 31 Oct is still upcoming).
+    monkeypatch.setattr(demo_provider, "_today", lambda: date(2026, 10, 26))
+    monkeypatch.setattr(main, "get_agent", lambda: ActionBridgeAgent(DemoProvider()))
+
+    # Session A: date-less request -> assistant asks for a day.
+    a1 = client.post("/api/chat",
+                     json={"session_id": "A", "text": "I have project submission"}).json()
+    assert a1["tool_calls"] == []
+    assert "when" in a1["reply"].lower()
+
+    # Session B has no pending request, so a bare explicit date invents nothing.
+    b1 = client.post("/api/chat", json={"session_id": "B", "text": "31 oct 26"}).json()
+    assert "create_commitment" not in {tc["name"] for tc in b1["tool_calls"]}
+    assert services.get_commitments()["commitments"] == []
+
+    # Session A supplies the explicit date and the commitment is completed.
+    a2 = client.post("/api/chat", json={"session_id": "A", "text": "31 oct 26"}).json()
+    assert "create_commitment" in {tc["name"] for tc in a2["tool_calls"]}
+    stored = services.get_commitments()["commitments"]
+    assert {c["title"] for c in stored} == {"project submission"}
+    assert stored[0]["due_date"] == "2026-10-31"
+
+
+def test_chat_impossible_date_rejected(tmp_db, client, monkeypatch):
+    from datetime import date
+
+    import demo_provider
+    from agent import ActionBridgeAgent
+    from demo_provider import DemoProvider
+
+    monkeypatch.setattr(demo_provider, "_today", lambda: date(2026, 10, 26))
+    monkeypatch.setattr(main, "get_agent", lambda: ActionBridgeAgent(DemoProvider()))
+
+    res = client.post("/api/chat",
+                      json={"session_id": "X", "text": "I have party on 31 February"}).json()
+    assert "create_commitment" not in {tc["name"] for tc in res["tool_calls"]}
+    assert "real date" in res["reply"].lower()
+    assert services.get_commitments()["commitments"] == []
