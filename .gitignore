@@ -3,6 +3,9 @@
 
 # Local databases
 *.db
+*.db.backup-*
+*.sqlite
+*.sqlite3
 
 # Python
 __pycache__/

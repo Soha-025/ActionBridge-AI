@@ -1,0 +1,6 @@
+# Test-only dependencies for the ActionBridge backend.
+# The application runtime does NOT need these; install them only to run pytest.
+# Usage:  pip install -r backend/requirements-dev.txt
+-r requirements.txt
+pytest
+httpx

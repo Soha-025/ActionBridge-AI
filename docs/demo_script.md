@@ -2,122 +2,118 @@
 
 ## Goal
 
-Demonstrate how ActionBridge AI understands commitments, remembers them,
-reasons about schedule changes, proposes a replan, and adapts after confirmation.
+Show how ActionBridge AI **understands** commitments, **remembers** them across
+sessions, **reasons** about a schedule change, **proposes** a replan, and
+**adapts** the real plan only after the human confirms.
 
-Core flow: Understand → Remember → Reason → Act → Adapt
+Core flow: **Understand → Remember → Reason → Act → Adapt**
 
-## 1. Pre-Demo Checklist
+## Recommended recording mode
 
-- Start the backend and confirm that the API is available.
-- Set the demo date consistently using `DEMO_TODAY`.
-- Load the demo commitments using `backend/seed.py`.
-- Confirm that the commitments and plan are available through the API.
-- Verify AWS credentials and Amazon Bedrock model access before attempting
-  the live AI demo.
-- Keep a clean backup recording in case the live demo encounters an issue.
+Run the app in **deterministic offline Demo Mode** for a reliable, reproducible
+recording:
+
+```
+DEMO_FALLBACK=true        # no Gemini key, no AWS credentials
+```
+
+- Use the **real current system date**. Do **not** set a fixed `DEMO_TODAY` —
+  Demo Mode anchors relative dates (`today`, `tonight`, `tomorrow`, weekdays) to
+  the actual current date.
+- **Gemini** (`LLM_PROVIDER=gemini` + `GEMINI_API_KEY`) is an *optional* live AI
+  mode. It has worked live but can hit rate limits (HTTP 429), so do not depend
+  on it for the recording.
+- **Amazon Bedrock** is an implemented provider (Bedrock Converse + tool calling),
+  but live requests have hit account/runtime token throttling. Do **not** claim
+  the recorded demo is powered by Bedrock unless it genuinely is.
+
+## 1. Pre-Recording Checks
+
+- [ ] Clean demo DB / state (use a fresh or isolated `DB_PATH` so the real demo
+      database is not disturbed).
+- [ ] Backend running (`DEMO_FALLBACK=true python -m uvicorn main:app --port 8000`).
+- [ ] Frontend running (`npm run dev`) and able to reach the backend.
+- [ ] Real current date is being used (no `DEMO_TODAY`, no `VITE_DEMO_TODAY`).
+- [ ] Exact scenario rehearsed (below).
+- [ ] **Cancel** path checked (plan unchanged).
+- [ ] **Apply** path checked (plan updates once, then persists).
+- [ ] **Persistence** checked (restart / new session keeps data).
+- [ ] Rehearse the complete successful run **three times**.
+- [ ] Keep the final recording **under 3 minutes**, in English.
 
 ## 2. Demo Walkthrough
 
-### Step 1 — Understand: Add commitments
+### Step 1 — Understand: add commitments
+In the Assistant, type:
 
-Enter this message in the chat:
+> I have a Statistics quiz Thursday, an AI assignment Friday and a presentation Saturday.
 
-"I have a Statistics quiz Thursday, AI assignment Friday and presentation Saturday."
+Expected: three commitments are created and persisted; a plan is built from the
+stored deadlines; the commitments appear in the dashboard.
 
-Expected result:
-- The agent identifies three commitments.
-- The commitments appear in the commitments panel.
-- A plan is generated from the stored commitments.
+### Step 2 — Remember: retrieve saved information
+Restart the backend or open a new session **without deleting the database**, then ask:
 
-### Step 2 — Remember: Retrieve saved information
+> What should I work on today?
 
-Restart the backend or open a new session without deleting the database.
+Expected: the answer is grounded in the previously **saved** commitments/plan —
+demonstrating persistent context across sessions.
 
-Ask:
+### Step 3 — Reason: change a deadline
+Type:
 
-"What should I work on today?"
+> My AI assignment deadline changed from Friday to Wednesday.
 
-Expected result:
-- The answer is based on previously stored commitments and plan data.
-- The commitments remain available after the restart.
+Expected: the agent identifies the affected commitment, runs a conflict check,
+and **proposes** an updated plan — **without applying it**. A pending change is
+created; the live plan is not yet mutated.
 
-### Step 3 — Adapt: Change a deadline
+### Step 4 — Review the impact
+Open the confirmation modal (and/or the Conflicts view).
 
-Enter:
+Expected: the diff shows the old date → new date and any affected/rebalanced
+tasks, with the message "Nothing has been applied yet." The user reviews before
+confirming.
 
-"My AI assignment deadline changed from Friday to Wednesday."
+### Step 5 — Act: confirm the change
+Click **Apply changes** in the modal.
 
-Expected result:
-- The agent identifies the affected commitment.
-- The system checks for conflicts and affected plan items.
-- The agent proposes an updated plan rather than applying it immediately.
-
-### Step 4 — Reason: Review the impact
-
-Review the Conflicts panel and the proposed changes.
-
-Expected result:
-- Relevant conflicts or affected tasks are explained.
-- The proposed plan shows what will change.
-- The user can review the proposed update before confirming it.
-
-### Step 5 — Human control: Confirm the changes
-
-When the confirmation modal appears, review the old and proposed plan.
-
-Choose **Apply Changes** to confirm the update.
-
-Expected result:
-- The backend applies the pending change.
-- The dashboard refreshes to show the updated plan.
-- The pending change is marked as applied.
-
-Important: proposing a replan must not apply it automatically.
-The user confirmation triggers the apply endpoint.
+Expected: the backend applies the pending change once (atomically); the
+dashboard refreshes to the updated plan; the change is marked **applied**. The
+model cannot perform this step — it is an explicit human action.
 
 ### Step 6 — Verify the result
+Check the updated plan/commitments and refresh the page.
 
-Check the updated plan and commitments.
-
-Expected result:
-- The new deadline is reflected correctly.
-- Only the intended changes are applied.
-- Stored data remains available after refreshing the dashboard.
+Expected: only the intended change applied; the new deadline is reflected; data
+persists after refresh.
 
 ## 3. Cancellation Check
 
-Repeat the deadline-change scenario and choose **Cancel** instead of
-Apply Changes.
+Repeat Step 3 and choose **Cancel proposal** instead of Apply.
 
-Expected result:
-- The proposed change is cancelled.
-- The existing plan remains unchanged.
+Expected: the proposed change is cancelled and the existing plan remains
+**unchanged**. (Closing the modal with the X / Esc / backdrop also dismisses the
+UI only — it does **not** cancel or apply the server-side proposal.)
 
 ## 4. Technical Points to Explain
 
-- **Frontend:** React, Vite and Tailwind CSS (planned stack).
+- **Frontend:** React, Vite, TypeScript, styled with **plain CSS** (no Tailwind).
 - **Backend:** FastAPI REST API.
-- **AI:** Amazon Bedrock Converse API for agent interactions and tool use.
-- **Tools:** MCP-based tools for commitments, planning, conflict detection
-  and proposed changes.
-- **Persistence:** SQLite stores commitments, plan items and pending changes.
-- **Human approval:** Applying a proposed replan requires an explicit user action.
+- **Providers:** one abstraction over Amazon Bedrock (Converse + tool calling),
+  Google Gemini, and a deterministic DemoProvider — selected by explicit config
+  only, never auto-switched on failure.
+- **Tools:** an in-process **MCP** server exposing exactly five model-facing
+  tools: `create_commitment`, `get_commitments`, `create_plan`,
+  `detect_conflicts`, `propose_replan`.
+- **Persistence:** SQLite stores commitments, plan items, and pending changes.
+- **Human approval:** `apply_changes` / `cancel_change` are **not** reachable by
+  the model; they run only through user-triggered HTTP endpoints.
 
-Describe only the components and integrations that have been verified in the
-current build. Do not claim a live Bedrock or complete frontend integration
-unless it has been tested.
-
-## 5. Recording Checklist
-
-- Reset or prepare the demo data before recording.
-- Confirm the displayed dates match the configured demo date.
-- Rehearse the complete flow at least three times.
-- Check both Apply and Cancel paths.
-- Keep the final recording concise and easy to follow.
-- Save a backup recording of a successful run.
+Describe only what is verified in the current build. In Demo Mode the deterministic
+provider runs the real agent → MCP → services → SQLite loop end to end.
 
 ## Closing Line
 
-"ActionBridge doesn't just tell you what to do. It helps your plan adapt
-when life changes."
+> "ActionBridge doesn't just tell you what to do. It helps your plan adapt when
+> life changes — and only after you say so."

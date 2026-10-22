@@ -1,355 +1,179 @@
-\# ActionBridge AI
+# ActionBridge AI
 
+**A persistent personal action agent that remembers commitments, detects how changes affect a plan, proposes targeted replans, and applies them only after explicit user confirmation.**
 
+ActionBridge AI is submitted as a **simulated Alexa+ agentic experience** in a **web application**. It is not a chatbot and not a to-do list: it keeps persistent context, reasons over that context through an MCP tool workflow, and only acts (changes your real data) after a human confirms.
 
-\*\*ActionBridge AI\*\* is an AI-powered planning assistant designed to help students manage commitments, organize their plans, identify scheduling conflicts, and review proposed changes before applying them.
+**Core flow:** Understand → Remember → Reason → Act → Adapt
 
+> A normal assistant may *tell* you that a deadline changed. ActionBridge determines **what that change affects**, proposes an **updated plan**, asks for **approval**, applies it **only after approval**, and **remembers the result**.
 
+---
 
-The project is being developed for the \*\*Amazon Alexa+ Hackathon\*\*.
+## Quick Start for Judges / Reviewers (no API key required)
 
+The **recommended reviewer path is deterministic offline Demo Mode**. It needs **no Gemini API key and no AWS credentials** and runs the full agent → MCP → services → SQLite loop end to end.
 
-
-\## Features
-
-
-
-\- \*\*Conversational planning:\*\* Interact with the assistant through a chat API.
-
-\- \*\*Commitment management:\*\* Retrieve and manage academic commitments.
-
-\- \*\*Daily planning:\*\* Generate and retrieve a structured plan.
-
-\- \*\*Conflict detection:\*\* Identify scheduling conflicts.
-
-\- \*\*Confirmation-based changes:\*\* Review proposed changes before applying or cancelling them.
-
-\- \*\*Persistent storage:\*\* Store application data in SQLite.
-
-\- \*\*AI integration:\*\* Use Amazon Bedrock's Converse API with tool calling through a provider abstraction and an MCP tool server.
-
-
-
-\## Technology Stack
-
-
-
-| Component | Technology |
-
-|---|---|
-
-| Backend API | FastAPI |
-
-| AI model integration | Amazon Bedrock Converse API |
-
-| AI tool integration | Python MCP SDK |
-
-| Database | SQLite |
-
-| AWS SDK | Boto3 |
-
-| Frontend | React, Vite, TypeScript, plain CSS |
-
-
-
-\## Project Structure
-
-
-
-```text
-
-ActionBridge-AI/
-
-├── backend/
-
-│   ├── main.py
-
-│   ├── agent.py
-
-│   ├── mcp\_server.py
-
-│   ├── services.py
-
-│   ├── llm\_provider.py
-
-│   ├── seed.py
-
-│   ├── requirements.txt
-
-│   ├── .env.example
-
-│   └── tests
-
-├── frontend/
-
-├── docs/
-
-├── README.md
-
-├── FRICTION\_LOG.md
-
-└── .gitignore
-
-```
-
-
-
-\## Prerequisites
-
-
-
-\- Python 3.10 or newer is recommended; the project has been tested in the current development environment with Python 3.13.
-
-\- AWS credentials configured through a supported Boto3 credential provider.
-
-\- Access to an Amazon Bedrock model that supports tool use, for AI-powered chat.
-
-\- Node.js and npm are required to install dependencies and run the React/Vite frontend.
-
-
-
-\## Backend Setup
-
-
-
-\### 1. Clone the repository
-
-
+> Demo Mode is honestly described as a **deterministic offline / reviewer demo mode**. It is a rule-based provider, **not** a full LLM.
 
 ```bash
-
+# 1. Clone
 git clone https://github.com/Soha-025/ActionBridge-AI.git
-
 cd ActionBridge-AI
 
-```
+# 2. Backend — create a virtual environment and install dependencies
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r backend/requirements.txt
 
-
-
-\### 2. Install Python dependencies
-
-
-
-```powershell
-
+# 3. Start the backend in Demo Mode (no keys needed), real current date
 cd backend
+DEMO_FALLBACK=true python -m uvicorn main:app --port 8000   # Windows (PowerShell): $env:DEMO_FALLBACK="true"; python -m uvicorn main:app --port 8000
 
-python -m pip install -r requirements.txt
-
+# 4. Frontend — install and run (separate terminal, from the repo root)
+cd ../frontend
+npm install
+npm run dev
 ```
 
+Open the URL printed by Vite (default `http://localhost:5173`). The frontend talks to the backend on `http://localhost:8000` out of the box (via the Vite dev proxy and CORS). No `.env` file is required for this path. `DEMO_TODAY` is **not** needed — Demo Mode uses the **real current system date**.
 
+### Run the exact demo scenario
 
-\### 3. Configure environment variables
+Type these into the **Assistant** in order:
 
+1. `I have a Statistics quiz Thursday, an AI assignment Friday and a presentation Saturday.`
+   → three commitments are created and persisted.
+2. **New session / restart the backend (keep the same DB):**
+   `What should I work on today?`
+   → the plan is rebuilt from the *saved* commitments (persistent memory across sessions).
+3. `My AI assignment deadline changed from Friday to Wednesday.`
+   → the agent detects the affected commitment, checks conflicts, and **proposes a replan** (nothing is applied yet).
+4. Review the affected tasks / conflict / proposed diff.
+5. The **confirmation modal** appears showing old → new dates and "Nothing has been applied yet."
+6. Click **Apply changes**.
+7. Verify the dashboard updates and the change is marked applied (it persists after refresh).
 
+Also demonstrate **Cancel**: repeat step 3 and choose **Cancel proposal** instead — the existing plan stays **unchanged**.
 
-Create a local `.env` file from the example:
+---
 
+## Providers
 
+ActionBridge uses a **provider abstraction**: the same agent, MCP tools, services, and SQLite layer run unchanged regardless of which language-model provider is selected. Providers are chosen by **explicit configuration only** — there is **no automatic failover after an API failure**.
 
-```powershell
-
-Copy-Item .env.example .env
-
-```
-
-
-
-Configure the following variables in `backend/.env`:
-
-
-
-```dotenv
-
-AWS\_REGION=us-east-1
-
-BEDROCK\_MODEL\_ID=your-enabled-bedrock-model-id
-
-DEMO\_TODAY=2026-10-26
-
-DB\_PATH=actionbridge.db
+Precedence (highest first):
 
 ```
-
-
-
-Replace the model ID placeholder with the ID of a tool-capable model enabled in your AWS Bedrock account.
-
-
-
-Configure AWS credentials separately using a supported Boto3 credential provider. Never commit `.env` or expose AWS credentials in source code.
-
-
-
-`DEMO\_TODAY` controls the reference date used by the demo. `DB\_PATH` selects the SQLite database file.
-
-
-
-\### 4. Start the backend
-
-
-
-From the `backend` directory:
-
-
-
-```powershell
-
-python -m uvicorn main:app --reload
-
+DEMO_FALLBACK=true   ->  deterministic DemoProvider   (A. recommended reviewer / no-key mode)
+LLM_PROVIDER=gemini  ->  live GeminiProvider          (B. optional live AI mode)
+otherwise            ->  BedrockProvider               (C. Amazon Bedrock)
 ```
 
+| Mode | How to enable | Requirements | Notes |
+|---|---|---|---|
+| **A. Reviewer / No-Key (recommended)** | `DEMO_FALLBACK=true` | none | Deterministic offline demo. No Gemini key, no AWS credentials. Real current date. |
+| **B. Optional Live Gemini** | `LLM_PROVIDER=gemini`, `GEMINI_API_KEY=…`, `GEMINI_MODEL=…` | Google Gemini API key | Exercised live successfully; subject to provider rate limits (e.g. HTTP 429). Not required for judging. |
+| **C. Amazon Bedrock** | unset both above; `AWS_REGION=…`, `BEDROCK_MODEL_ID=…` + standard Boto3 credentials | AWS credentials + tool-capable Bedrock model | Implemented via the Bedrock Converse / tool-calling API. Requests reached AWS during testing but hit account/runtime token throttling, so a live Bedrock run is **not** required to reproduce the demo. Do **not** claim the recorded demo is powered by Bedrock unless it actually is. |
 
+Copy `backend/.env.example` to `backend/.env` and set only the variables for the mode you want. `backend/.env` is git-ignored.
 
-The API will be available at:
+---
 
+## Technology Stack (verified against the code)
 
+| Component | Technology |
+|---|---|
+| Frontend | React + Vite + TypeScript, styled with **plain CSS** (`frontend/src/components/actionbridge.css`) — **no Tailwind / no CSS framework** |
+| Backend API | FastAPI (Uvicorn) |
+| Tool layer | Python **MCP SDK** (in-process MCP server exposing the safe tools) |
+| Model providers | Amazon Bedrock (Converse + tool calling), Google Gemini, and a deterministic DemoProvider — behind one abstraction |
+| Persistence | SQLite (standard library, no ORM) |
+| Language | Python 3.10+ (developed/tested on 3.13), Node.js + npm |
 
-\- API base URL: `http://127.0.0.1:8000`
+---
 
-\- Interactive API documentation: `http://127.0.0.1:8000/docs`
-
-
-
-Keep the terminal running while testing the API.
-
-
-
-\## Demo Data
-
-
-
-The seed script creates three sample academic commitments:
-
-
-
-\- Statistics quiz — Thursday
-
-\- AI assignment — Friday
-
-\- Presentation — Saturday
-
-
-
-To use the fixed demo date and an isolated test database in PowerShell:
-
-
-
-```powershell
-
-$env:DEMO\_TODAY = "2026-10-26"
-
-$env:DB\_PATH = ".\\actionbridge\_test.db"
-
-python seed.py
+## Architecture Overview
 
 ```
+Frontend (React/Vite/TS)
+  → FastAPI (main.py)
+    → ActionBridge Agent (agent.py)            # multi-round tool-use loop
+      → Provider abstraction (Bedrock / Gemini / Demo)
+        → MCP safe tools (mcp_server.py)        # only 5 model-facing tools
+          → deterministic services (services.py)
+            → SQLite (commitments, plan_items, pending_changes)
+```
 
+**Human-confirmation boundary (safety invariant):**
 
+- The model/agent can only call **five** tools: `create_commitment`, `get_commitments`, `create_plan`, `detect_conflicts`, `propose_replan`.
+- The model **cannot** call `apply_changes` or `cancel_change`. Those (plus `get_change`) are reachable **only** through plain HTTP endpoints that call the service layer directly: `POST /api/changes/{id}/apply` and `POST /api/changes/{id}/cancel`.
+- `propose_replan` **never** mutates a commitment — it records a **pending** change. Applying it is a separate, server-side, human-triggered step. Duplicate applies are rejected (HTTP 409); reload never auto-applies or auto-cancels.
 
-Run the command again to verify that existing demo records are detected instead of duplicated.
+---
 
-
-
-The isolated database is useful for testing without modifying the default application database.
-
-
-
-\## API Endpoints
-
-
+## API Endpoints
 
 | Method | Endpoint | Purpose |
-
 |---|---|---|
-
-| POST | `/api/chat` | Send a message to the assistant |
-
+| POST | `/api/chat` | Send a message to the assistant (agent + MCP tools) |
 | GET | `/api/commitments` | Retrieve commitments |
-
 | GET | `/api/plan` | Retrieve the current plan |
+| GET | `/api/conflicts` | Contextual "what-if" conflict check for a proposed move |
+| GET | `/api/changes/{change_id}` | Retrieve details/diff of a proposed change |
+| POST | `/api/changes/{change_id}/apply` | Apply a proposed change (human confirmation) |
+| POST | `/api/changes/{change_id}/cancel` | Cancel a proposed change (human confirmation) |
 
-| GET | `/api/conflicts` | Retrieve scheduling conflicts |
+Interactive docs: `http://localhost:8000/docs` while the backend is running.
 
-| GET | `/api/changes/{change\_id}` | Retrieve details of a proposed change |
+---
 
-| POST | `/api/changes/{change\_id}/apply` | Apply a proposed change |
+## Running the Tests
 
-| POST | `/api/changes/{change\_id}/cancel` | Cancel a proposed change |
+`pytest` and `httpx` are **test-only** dependencies (not needed to run the app). Install them, then run the suite:
 
-
-
-For request and response schemas, open `/docs` while the backend is running.
-
-
-
-\## Running Tests
-
-
-
-From the `backend` directory:
-
-
-
-```powershell
-
-python -m pytest -q
-
+```bash
+cd backend
+pip install -r requirements-dev.txt          # adds pytest + httpx on top of runtime deps
+DEMO_FALLBACK=true python -m pytest -q        # keep provider selection deterministic
 ```
 
+Latest evidence:
 
+- **Backend:** **197 tests passed** with one non-blocking Starlette/httpx deprecation warning.
+- **Frontend:** `npm run build` (TypeScript check + Vite production build) **passes**.
 
-The current development checkout passed **160 backend tests** with one non-blocking deprecation warning. The frontend TypeScript check and Vite production build also completed successfully. Re-run both checks after making changes.
+> Note: set `DEMO_FALLBACK=true` (or otherwise leave `LLM_PROVIDER` unset) so the suite does not pick up a `LLM_PROVIDER=gemini` from a local `.env`, which would make the provider-selection test fail for environmental reasons.
 
+---
 
+## Optional Demo Seeding
 
-\## Architecture Overview
+`backend/seed.py` creates the three sample commitments idempotently (a second run detects existing records instead of duplicating them). Use an isolated database so you never touch the real demo DB:
 
+```bash
+cd backend
+DB_PATH=./actionbridge_demo.db DEMO_FALLBACK=true python seed.py
+```
 
+Seeding uses the real current date by default. `DEMO_TODAY` is an **optional** service-level override for controlled tests only and is **not** required for normal use.
 
-1\. The frontend communicates with the FastAPI backend over REST.
+---
 
-2\. The backend coordinates chat requests through the ActionBridge agent.
+## Security & Repo Hygiene
 
-3\. The agent uses the configured language model provider to communicate with Amazon Bedrock.
+- `.env`, all cloud credentials, and API keys are kept out of version control (`.env` and `*.db` are git-ignored; database backups such as `*.db.backup-*` are ignored too).
+- `.env.example` files document variable **names** only — never real secrets.
+- No AWS credentials or Gemini keys belong in the frontend.
+- Review and explicitly confirm any proposed change before it is applied.
 
-4\. The MCP tool server exposes application tools for commitment management, planning, conflict detection, and proposed changes.
+---
 
-5\. Python services handle application logic and SQLite persistence.
+## License
 
-6\. Proposed changes require an explicit confirmation action through the apply endpoint.
+Released under the **MIT License** (see `LICENSE`).
 
+## Team
 
-
-\## Development Status
-
-
-
-The backend tests, API startup, and deterministic demo seeding have been verified in the current development environment.
-
-
-
-The frontend and end-to-end integration still require verification in the shared checkout. Amazon Bedrock chat functionality also requires valid AWS credentials and access to the configured model.
-
-
-
-\## Security
-
-
-
-\- Keep `.env`, AWS credentials, and other secrets out of version control.
-
-\- Use `.env.example` to document variable names without including real credentials.
-
-\- Use a separate database when testing demo data.
-
-\- Review and test proposed changes before applying them.
-
-
-
-\## Team and Contributions
-
-
-
-ActionBridge AI is being developed collaboratively for the Amazon Alexa+ Hackathon. Contributions include backend and AI integration, frontend development, planning logic, testing, documentation, and demo preparation.
+ActionBridge AI is developed collaboratively for the Amazon "Build, Ship, Shape" Developer Hackathon (Alexa+ track) as a simulated Alexa+ agentic experience: backend/AI integration, frontend, planning logic, testing, documentation, and demo.

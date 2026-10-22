@@ -8,13 +8,25 @@ W, H = 1600, 1050
 img = Image.new("RGB", (W, H), "#F7F9FC")
 draw = ImageDraw.Draw(img)
 
-font_dir = Path(r"C:\Windows\Fonts")
+FONT_CANDIDATES = {
+    False: [
+        r"C:\Windows\Fonts\arial.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ],
+    True: [
+        r"C:\Windows\Fonts\arialbd.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ],
+}
 def get_font(size, bold=False):
-    name = "arialbd.ttf" if bold else "arial.ttf"
-    try:
-        return ImageFont.truetype(str(font_dir / name), size)
-    except OSError:
-        return ImageFont.load_default()
+    for path in FONT_CANDIDATES[bold]:
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
 
 title_font = get_font(38, True)
 subtitle_font = get_font(20)
@@ -47,17 +59,17 @@ def arrow(points, color="#64748B", width=4, head=12):
     right = (x2-head*math.cos(angle+0.55), y2-head*math.sin(angle+0.55))
     draw.polygon([(x2,y2), left, right], fill=color)
 
-centered("ActionBridge AI — System Architecture", 40, 25, W-40, 80, title_font)
-centered("Current backend tested; frontend and live cloud integration require verification",
+centered("ActionBridge AI \u2014 System Architecture", 40, 25, W-40, 80, title_font)
+centered("Backend and frontend implemented and tested locally; live cloud integration requires verification",
          40, 78, W-40, 115, subtitle_font, "#475569")
 
-# User and planned frontend
+# User and frontend
 box(510, 145, 1090, 255, "User / Browser",
     ["Interacts with the assistant and reviews proposed changes"],
     "#E8F1FF")
-box(510, 310, 1090, 445, "Frontend — Planned",
-    ["React + Vite + Tailwind", "Chat, commitments, plan, conflicts, confirmation"],
-    "#FFF4D6", "#E7C875")
+box(510, 310, 1090, 445, "Frontend",
+    ["React + Vite + TypeScript + plain CSS", "Chat, commitments, plan, conflicts, confirmation"],
+    "#DFF7E8", "#8BC9A2")
 arrow([(800,255),(800,310)])
 centered("User interaction", 825, 267, 1010, 300, small_font, "#64748B")
 
@@ -97,9 +109,9 @@ draw.rounded_rectangle((220, 941, 245, 963), radius=4,
 draw.text((255, 940), "Implemented / tested locally", font=small_font, fill="#334155")
 draw.rounded_rectangle((540, 941, 565, 963), radius=4,
                        fill="#FFF4D6", outline="#E7C875")
-draw.text((575, 940), "Planned or incomplete", font=small_font, fill="#334155")
+draw.text((575, 940), "Live cloud integration / credentials pending verification", font=small_font, fill="#334155")
 draw.text((80, 972),
-          "Architecture reflects the repository state; cloud credentials and end-to-end UI flow are not confirmed.",
+          "Architecture reflects the repository state; frontend and backend are implemented and tested locally, while live cloud credentials and inference are not confirmed.",
           font=small_font, fill="#64748B")
 
 img.save(OUT)
