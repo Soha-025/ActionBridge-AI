@@ -34,8 +34,20 @@ export const DEMO_BANNER_TEXT =
 
 const CREATED_AT = "2026-10-20T09:00:00";
 
-/** Simulated latency, so loading states are actually observable offline. */
-const LATENCY_MS = 350;
+const DEFAULT_LATENCY_MS = 350;
+
+/**
+ * Simulated latency, so loading states are observable offline. QA can widen the
+ * window with VITE_DEMO_LATENCY_MS — a browser round-trip is longer than 350 ms,
+ * which is why the first-paint skeletons were previously impossible to catch.
+ * Demo-only: the real API path never reads this.
+ */
+const LATENCY_MS = (() => {
+  const raw = (import.meta as unknown as { env?: Record<string, string | undefined> }).env
+    ?.VITE_DEMO_LATENCY_MS;
+  const parsed = Number((raw ?? "").trim());
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_LATENCY_MS;
+})();
 
 export function isDemoMode(): boolean {
   const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;

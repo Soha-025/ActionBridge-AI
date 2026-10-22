@@ -69,6 +69,18 @@ Full commands, reproduction steps and the unverified list: `docs/dashboard_qa.md
   `propose_replan` → `GET /api/changes/{id}` → cancel (dates unchanged) → apply after cancel
   (**HTTP 409**) → UI confirm modal apply → new dates read back from SQLite in a separate process
   — **passed**.
+- Completeness audit on `742f625` — `npm run typecheck` exit 0, `npm run build` exit 0
+  (41 modules, 185.9 kB JS / 12.31 kB CSS), `pytest -q` **160 passed**, browser console clean.
+  Four items that were previously only code-verified are now **observed**: first-paint skeletons
+  (7 on Today, 2 on Conflicts, correct `role="status"` + `aria-live` and labels), empty states
+  against a genuinely empty database (`{"commitments":[]}` / `{"plan_items":[]}`) in all three
+  panels, `Cancel proposal` driven through the UI (server reports `cancelled`, dates unchanged,
+  `?change=` stripped, applying the dead id gives **HTTP 409**), and the top-bar `Offline` badge
+  with **Retry** recovery. Responsive behaviour was re-measured with same-origin iframes and the
+  recorded breakpoints corrected: two columns require **>1024px**, row wrap requires **≤860px**.
+  One demo-only source change came out of it — `demoData.ts` now reads `VITE_DEMO_LATENCY_MS`
+  (default still 350 ms), which is what makes the skeleton check reproducible. Full table of
+  results in `docs/dashboard_qa.md` §8.
 - Still **not verified**: live Amazon Bedrock (§6 / `FRICTION_LOG.md` §4), estimated hours
   (no backend field), plan-step completion transitions (no endpoint), physical devices, screen
   readers, non-Chromium browsers.
