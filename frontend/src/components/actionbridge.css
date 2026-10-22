@@ -506,3 +506,49 @@ button { font-family: inherit; }
   .ab-row__badges { max-width: 100%; justify-content: flex-start; }
   .ab-row { flex-wrap: wrap; align-items: flex-start; }
 }
+
+/* ------------------------------------------------------------------ voice */
+/* M2 additive: styles for the browser-native voice controls in ChatPanel.
+   New scoped classes only — nothing above this line was changed. */
+.ab-chat__controls { display: flex; align-items: center; gap: 8px; }
+
+.ab-msg__actions { margin-top: 8px; }
+.ab-speak-btn { color: var(--text-subtle); }
+.ab-speak-btn[aria-pressed="true"] { color: var(--primary); }
+
+/* Mic button gets a pulsing ring while dictation is live. */
+.ab-mic-btn--live {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-soft);
+  animation: ab-mic-pulse 1.2s ease-in-out infinite;
+}
+@keyframes ab-mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(185, 28, 28, 0.35); }
+  50% { box-shadow: 0 0 0 5px rgba(185, 28, 28, 0); }
+}
+
+/* Auto-read switch row above the composer. */
+.ab-voice-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.ab-voice-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+.ab-voice-toggle input { accent-color: var(--primary); cursor: pointer; }
+.ab-voice-note { font-size: 12px; color: var(--text-subtle); }
+
+@media (prefers-reduced-motion: reduce) {
+  .ab-mic-btn--live { animation: none; }
+}
