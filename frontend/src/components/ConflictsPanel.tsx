@@ -1,39 +1,51 @@
 /**
- * ConflictsPanel — M5 dashboard panel for scheduling conflicts.
+ * ConflictsPanel — presentational conflicts view (Member 5).
  *
- * Data contract: GET /api/conflicts is contextual. It requires
- * `commitment_id` + `new_due_date` and answers "what pressure would this move
- * create?" — the backend has no endpoint that lists existing conflicts for the
- * plan as it stands, so this panel runs a real check on demand instead of
- * implying a background scan exists.
+ * This component implements the contract Member 1 declared in `types.ts`
+ * (`ConflictsPanelProps { conflicts }`): it never fetches, never aborts a request
+ * and never owns the picker state. `ConflictChecker.tsx` is the container that
+ * calls the contextual endpoint and hands the results down here.
  *
  * A conflict row always stays unresolved here: detection reports pressure, and
  * only the Assistant + your explicit confirmation (the /api/changes flow) may
  * change a date. Nothing in this file marks a conflict as fixed.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Commitment, ConflictsQuery, ConflictsResponse, Conflict, PlanItem } from "../types";
-import { badgeClass, capitalize, addDaysIso, formatDateShort, isIsoDate } from "../format";
+import type {
+  Commitment,
+  Conflict,
+  ConflictsPanelProps as ConflictsPanelContract,
+  ConflictsQuery,
+  PlanItem,
+} from "../types";
+import { badgeClass, capitalize, formatDateShort, isIsoDate } from "../format";
 import { EmptyState, ErrorState, LoadingRows } from "./PanelState";
 
-export interface ConflictsPanelProps {
+export interface ConflictsPanelProps extends ConflictsPanelContract {
   commitments: Commitment[];
   /** Full plan, used to match a conflicted commitment to its plan steps. */
   plan: PlanItem[];
-  /** Reference date used to suggest a sane default target date. */
-  today: string;
   loading: boolean;
   error: string | null;
   onRetry: () => void;
-  /** Injected so the panel works against the real API or the demo source. */
-  getConflicts: (params: ConflictsQuery, signal?: AbortSignal) => Promise<ConflictsResponse>;
+  /** Picker state, owned by the container. */
+  selectedId: string;
+  targetDate: string;
+  /** The commitment behind `selectedId`, resolved by the container. */
+  selected: Commitment | null;
+  /** Date offered as an example target (reference date + 3 days). */
+  suggestedDate: string;
+  /** False until a commitment and a valid `YYYY-MM-DD` date are both set. */
+  canRun: boolean;
+  checking: boolean;
+  /** The move the last successful check describes; null until one has run. */
+  checked: ConflictsQuery | null;
+  /** Message from the last failed check; null while the last run succeeded. */
+  checkError: string | null;
+  onSelectChange: (value: string) => void;
+  onTargetDateChange: (value: string) => void;
+  onRunCheck: () => void;
 }
-
-type CheckResult =
-  | { status: "idle" }
-  | { status: "ok"; conflicts: Conflict[]; checked: ConflictsQuery }
-  | { status: "error"; message: string };
 
 const CONFLICT_TONE: Record<string, "danger" | "warning"> = {
   collision: "danger",
@@ -77,66 +89,26 @@ function ConflictRow({ conflict, plan }: { conflict: Conflict; plan: PlanItem[] 
 }
 
 export default function ConflictsPanel({
+  conflicts,
+  checked,
+  checkError,
   commitments,
   plan,
-  today,
   loading,
   error,
   onRetry,
-  getConflicts,
+  selectedId,
+  targetDate,
+  selected,
+  suggestedDate,
+  canRun,
+  checking,
+  onSelectChange,
+  onTargetDateChange,
+  onRunCheck,
 }: ConflictsPanelProps) {
-  const [selectedId, setSelectedId] = useState("");
-  const [targetDate, setTargetDate] = useState("");
-  const [checking, setChecking] = useState(false);
-  const [result, setResult] = useState<CheckResult>({ status: "idle" });
-  const controllerRef = useRef<AbortController | null>(null);
-
-  useEffect(() => () => controllerRef.current?.abort(), []);
-
-  const selected = useMemo(
-    () => commitments.find((item) => String(item.id) === selectedId),
-    [commitments, selectedId],
-  );
-
-  /** Keep the target date blank until the user picks one; suggest +3 days. */
-  const suggestedDate = useMemo(() => addDaysIso(today, 3), [today]);
-
-  const canRun = selectedId !== "" && isIsoDate(targetDate);
-
-  const runCheck = useCallback(async () => {
-    const commitmentId = Number(selectedId);
-    if (!commitmentId || !isIsoDate(targetDate)) {
-      setResult({
-        status: "error",
-        message: "Pick a commitment and enter a valid target date (YYYY-MM-DD) before checking.",
-      });
-      return;
-    }
-    controllerRef.current?.abort();
-    const controller = new AbortController();
-    controllerRef.current = controller;
-    setChecking(true);
-    try {
-      const response = await getConflicts({ commitment_id: commitmentId, new_due_date: targetDate }, controller.signal);
-      if (controller.signal.aborted) return;
-      setResult({
-        status: "ok",
-        conflicts: response.conflicts ?? [],
-        checked: { commitment_id: commitmentId, new_due_date: targetDate },
-      });
-    } catch (err) {
-      if (controller.signal.aborted) return;
-      setResult({
-        status: "error",
-        message: err instanceof Error ? err.message : "The conflict check failed.",
-      });
-    } finally {
-      setChecking(false);
-    }
-  }, [selectedId, targetDate, getConflicts]);
-
-  const movedCommitment = result.status === "ok"
-    ? commitments.find((item) => item.id === result.checked.commitment_id)
+  const movedCommitment = checked
+    ? commitments.find((item) => item.id === checked.commitment_id)
     : selected;
 
   return (
@@ -183,7 +155,7 @@ export default function ConflictsPanel({
                   className="ab-chat__textarea"
                   style={{ minHeight: 42, padding: "8px 12px", maxHeight: 120 }}
                   value={selectedId}
-                  onChange={(event) => setSelectedId(event.target.value)}
+                  onChange={(event) => onSelectChange(event.target.value)}
                 >
                   <option value="">Select a commitment…</option>
                   {commitments.map((item) => (
@@ -203,13 +175,13 @@ export default function ConflictsPanel({
                   type="date"
                   value={targetDate}
                   min="2000-01-01"
-                  onChange={(event) => setTargetDate(event.target.value)}
+                  onChange={(event) => onTargetDateChange(event.target.value)}
                 />
               </label>
               <button
                 type="button"
                 className="ab-btn ab-btn--primary"
-                onClick={() => void runCheck()}
+                onClick={onRunCheck}
                 disabled={checking || !canRun}
               >
                 {checking ? "Checking…" : "Check conflicts"}
@@ -229,34 +201,34 @@ export default function ConflictsPanel({
               </div>
             )}
 
-            {result.status === "error" && (
+            {checkError && (
               <div style={{ marginBottom: 12 }}>
-                <ErrorState message={result.message} onRetry={() => void runCheck()} />
+                <ErrorState message={checkError} onRetry={onRunCheck} />
               </div>
             )}
 
             {checking && <LoadingRows label="the conflict check" rows={2} />}
 
-            {result.status === "ok" && result.conflicts.length === 0 && (
+            {checked && conflicts.length === 0 && (
               <div className="ab-banner ab-banner--success" role="status">
                 <div>
                   No conflicts detected by the backend for “{movedCommitment?.title ??
-                    `commitment #${result.checked.commitment_id}`}” on {result.checked.new_due_date}.
+                    `commitment #${checked.commitment_id}`}” on {checked.new_due_date}.
                   This is only a preview — no date has been changed.
                 </div>
               </div>
             )}
 
-            {result.status === "ok" && result.conflicts.length > 0 && (
+            {checked && conflicts.length > 0 && (
               <div className="ab-conflicts">
                 <div className="ab-banner ab-banner--warning" role="status">
                   <div>
-                    Proposed move: “{movedCommitment?.title ?? `commitment #${result.checked.commitment_id}`}”
+                    Proposed move: “{movedCommitment?.title ?? `commitment #${checked.commitment_id}`}”
                     {movedCommitment ? ` from ${movedCommitment.due_date}` : ""} to{" "}
-                    <strong>{result.checked.new_due_date}</strong>. Nothing has been applied.
+                    <strong>{checked.new_due_date}</strong>. Nothing has been applied.
                   </div>
                 </div>
-                {result.conflicts.map((conflict, index) => (
+                {conflicts.map((conflict, index) => (
                   <ConflictRow
                     key={`${conflict.commitment_id}-${conflict.type}-${index}`}
                     conflict={conflict}
@@ -265,7 +237,7 @@ export default function ConflictsPanel({
                 ))}
                 <div className="ab-banner ab-banner--warning" style={{ marginTop: 4 }} role="status">
                   <div>
-                    {result.conflicts.length} conflict{result.conflicts.length === 1 ? "" : "s"} still
+                    {conflicts.length} conflict{conflicts.length === 1 ? "" : "s"} still
                     open. Ask the Assistant to reschedule, then confirm the proposal it shows you —
                     this panel cannot resolve anything by itself.
                   </div>
@@ -273,7 +245,7 @@ export default function ConflictsPanel({
               </div>
             )}
 
-            {result.status === "idle" && !checking && (
+            {!checked && !checking && !checkError && (
               <EmptyState
                 icon="⚠️"
                 title="No check has been run yet"

@@ -13,7 +13,7 @@ import ChatPanel from "./components/ChatPanel";
 import ConfirmModal from "./components/ConfirmModal";
 import TodayPlan from "./components/TodayPlan";
 import CommitmentsPanel from "./components/CommitmentsPanel";
-import ConflictsPanel from "./components/ConflictsPanel";
+import ConflictChecker from "./components/ConflictChecker";
 import { formatLongDate } from "./format";
 import { createDemoSource, DEMO_BANNER_TEXT, isDemoMode } from "./demoData";
 
@@ -483,7 +483,7 @@ export default function App() {
 
               {view === "conflicts" && (
                 <div style={{ maxWidth: 860 }}>
-                  <ConflictsPanel
+                  <ConflictChecker
                     commitments={activeCommitments}
                     plan={plan}
                     today={referenceDate}

@@ -48,6 +48,13 @@ Full commands, reproduction steps and the unverified list: `docs/dashboard_qa.md
   Re-verified in the browser: `?change=<id>` opens the modal, Apply persists to SQLite, strips
   the URL parameter and refreshes the dashboard. Details in `docs/dashboard_qa.md` §7.
 - Lint / frontend unit tests: **not available** — neither is configured in `frontend/package.json`.
+- Panel API-contract alignment (`member 5` follow-up) — **passed**. `types.ts`, `api.ts` and
+  `ConfirmModal.tsx` are unchanged; a new `components/ConflictChecker.tsx` container owns the
+  contextual `GET /api/conflicts` call, and `ConflictsPanel.tsx` now extends Member 1's declared
+  `ConflictsPanelProps { conflicts }` instead of fetching. Re-verified in the browser: no request
+  before the button click, collision row + matched plan step, same-date note, no stacked results,
+  error state + **Retry** recovery, abort on unmount; Member 1's deep link, modal and
+  apply → resync still work. `npm run build` exit 0 and `pytest -q` 160 passed on the same tree.
 - Browser check of all three panels in both modes (real API + `VITE_DEMO_MODE`): load, multiple
   rows, completed vs pending, priority, deadline, empty, error+retry, conflict→plan-step matching,
   responsive down to 390px — **passed**, console clean.

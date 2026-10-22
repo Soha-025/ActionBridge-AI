@@ -56,7 +56,7 @@ No backend, no `DEMO_FALLBACK`, no network.
 
 | Command | Result observed here |
 | --- | --- |
-| `npm run build` (`tsc --noEmit && vite build`) | **Passed**, exit 0. 40 modules, `dist` 185.4 kB JS / 12.3 kB CSS |
+| `npm run build` (`tsc --noEmit && vite build`) | **Passed**, exit 0. 41 modules, `dist` 185.8 kB JS / 12.3 kB CSS |
 | `python -m pytest -q` (backend) | **Passed** — 160 passed, 1 non-blocking Starlette deprecation warning |
 | Lint | **Not available** — no linter is configured in `frontend/package.json` |
 | Frontend unit tests | **Not available** — no test runner is configured |
@@ -204,15 +204,44 @@ note; `/?change=<id>` opened Member 1's modal directly; **Apply changes** persis
 address bar and resynced the panel to `due Oct 26 (in 4d)`. Console stayed clean. Demo mode
 still shows its banner, badge and synthetic hours.
 
-### Open question for Member 1
+### Contract mismatch — resolved on this branch
 
-`types.ts` now declares `TodayPlanProps { today, items }`, `CommitmentsPanelProps
-{ commitments }` and `ConflictsPanelProps { conflicts }` with the rule that panels must not
-fetch, while my components require `loading` / `error` / `onRetry` and `ConflictsPanel`
-takes an injected `getConflicts`. The mismatch is not a build problem today: nothing
-consumes those three interfaces, and my modules export same-named props of their own.
+Closed without touching Member 1's files. `types.ts`, `api.ts` and `ConfirmModal.tsx` are
+byte-identical to `origin/main`; everything is inside M5's own components.
 
-It needs a decision I should not make alone, because `GET /api/conflicts` is contextual —
-it requires a `commitment_id` plus a `new_due_date` — so a panel cannot receive an honest
-pre-fetched `conflicts` list. Either Member 1 adopts the real prop shapes, or a thin
-container in `App.tsx` owns the what-if fetch and my panel becomes presentational.
+- **`components/ConflictChecker.tsx` (new, container)** owns the picker state, the one
+  contextual `GET /api/conflicts` call and its `AbortController` lifecycle. It fires only
+  when a real `commitment_id` and a valid `new_due_date` both exist — there is still no
+  "list all conflicts" request anywhere, because no such endpoint exists.
+- **`components/ConflictsPanel.tsx` (presentational)** now declares
+  `interface ConflictsPanelProps extends ConflictsPanelContract`, importing Member 1's
+  `ConflictsPanelProps { conflicts: Conflict[] }` from `../types`. `conflicts` carries the
+  last successful check (`[]` before one has run or after a failure) and
+  `checked: ConflictsQuery | null` names the move it describes. No fetching remains in the
+  file, which is what their rule asked for.
+- **`App.tsx`** changed by two lines: the import and the `<ConflictChecker>` element at the
+  `view === "conflicts"` mount. Its seven props are unchanged, so demo mode still injects
+  `DashboardSource.getConflicts` and the offline path keeps working.
+
+`TodayPlanProps` and `CommitmentsPanelProps` needed nothing: `TodayPlan.tsx` and
+`CommitmentsPanel.tsx` already use exactly those names and types and merely add optional
+props, so Member 1's declared shape is a subset of what is rendered. One caveat stays on
+record — their comment also says panels must not *derive*. The panels still sort rows and
+pick tone classes locally; moving that into `App.tsx` is a design call for Member 1, not a
+defect, and I have not made it for them.
+
+Evidence after the split, real API on `:5173`: no `/api/conflicts` request existed before
+the button was clicked (the network list held only the two dashboard reads); one call,
+`commitment_id=1&new_due_date=2026-10-22`, returned the collision row with the backend's own
+reason text and its matched `plan #33: stats assignment · planned`; choosing a target equal
+to the current due date still printed the same-date note; a zero-conflict date replaced the
+earlier results instead of stacking them; stopping the backend showed `ab-banner--error`
+("Cannot reach the ActionBridge backend…") with **Retry**, which recovered to the
+zero-conflict banner once the server was back up; switching views mid-request aborted
+cleanly. Demo mode on `:5174` produced two collision rows with plan steps through the same
+container, and a non-existent option value left the button correctly disabled. Console was
+clean apart from the one `ERR_CONNECTION_REFUSED` I caused on purpose. Member 1's flow on the
+same build: the chat proposal mirrored `?change=<id>`, that link reopened their modal on a
+fresh load, **Apply changes** persisted (`AI quiz` → `2026-10-28` in SQLite), cleared the
+param, and the resync fired — `POST …/apply` was followed by
+`GET /api/commitments` + `GET /api/plan`.
