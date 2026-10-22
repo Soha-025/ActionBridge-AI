@@ -2,7 +2,14 @@
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
 import "./components/actionbridge.css";
 import { api, ApiError } from "./api";
-import type { Commitment, Conflict, PlanItem } from "./types";
+import type {
+  ApplyChangeResponse,
+  CancelChangeResponse,
+  ChatResponse,
+  Commitment,
+  Conflict,
+  PlanItem,
+} from "./types";
 import ChatPanel from "./components/ChatPanel";
 import ConfirmModal from "./components/ConfirmModal";
 
@@ -61,6 +68,58 @@ function todayIso(): string {
   return new Date(d.getTime() - off * 60_000).toISOString().slice(0, 10);
 }
 
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Reference "today" for the UI. The backend plans against its own DEMO_TODAY
+ * (services._today()), which the browser cannot observe, so the demo date has to
+ * be shared explicitly. Precedence: a server-provided date (not sent by the
+ * current backend) > VITE_DEMO_TODAY (frontend/.env) > the machine clock.
+ */
+function envDemoToday(): string | null {
+  const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
+  const value = env?.VITE_DEMO_TODAY?.trim();
+  return value && ISO_DATE_RE.test(value) ? value : null;
+}
+
+function resolveReferenceDate(serverToday?: string): string {
+  if (serverToday && ISO_DATE_RE.test(serverToday)) return serverToday;
+  return envDemoToday() ?? todayIso();
+}
+
+function newSessionId(): string {
+  const c = globalThis.crypto as Crypto | undefined;
+  if (c && typeof c.randomUUID === "function") return c.randomUUID();
+  return `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+/**
+ * Device-local record of proposal ids that were created by the backend and not
+ * yet applied or cancelled. The backend has no "list pending changes" endpoint,
+ * so this is only a way to reopen a proposal on this device/browser — the modal
+ * always re-reads the real status from GET /api/changes/{id} before acting.
+ */
+const PENDING_STORE_KEY = "actionbridge:pending-changes";
+
+function readStoredPendingIds(): string[] {
+  try {
+    const parsed: unknown = JSON.parse(globalThis.localStorage?.getItem(PENDING_STORE_KEY) ?? "[]");
+    return Array.isArray(parsed)
+      ? parsed.filter((v): v is string => typeof v === "string" && v.length > 0).slice(0, 5)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredPendingIds(ids: string[]): void {
+  try {
+    globalThis.localStorage?.setItem(PENDING_STORE_KEY, JSON.stringify(ids.slice(0, 5)));
+  } catch {
+    // Private mode / storage disabled: reopening falls back to the current page.
+  }
+}
+
 function formatLongDate(iso: string): string {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
   const d = new Date(`${iso}T00:00:00`);
@@ -83,6 +142,10 @@ function formatDateShort(iso: string): string {
 export default function App() {
   const [view, setView] = useState<ViewId>("today");
 
+  // One conversation identity for the whole page life, owned here so switching
+  // views cannot rotate it and orphans the chat.
+  const [sessionId] = useState(newSessionId);
+
   const [commitments, setCommitments] = useState<Commitment[]>([]);
   const [plan, setPlan] = useState<PlanItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -91,6 +154,20 @@ export default function App() {
 
   const [modalChangeId, setModalChangeId] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
+  const [pendingIds, setPendingIds] = useState<string[]>(readStoredPendingIds);
+  const [flash, setFlash] = useState<{ tone: "success" | "info"; text: string } | null>(null);
+
+  const [referenceDate, setReferenceDate] = useState(() => resolveReferenceDate());
+
+  useEffect(() => {
+    writeStoredPendingIds(pendingIds);
+  }, [pendingIds]);
+
+  useEffect(() => {
+    if (!flash) return undefined;
+    const timer = window.setTimeout(() => setFlash(null), 12_000);
+    return () => window.clearTimeout(timer);
+  }, [flash]);
 
   const load = useCallback(async (mode: "initial" | "refresh") => {
     if (mode === "initial") setLoading(true);
@@ -99,6 +176,7 @@ export default function App() {
       const [c, p] = await Promise.all([api.getCommitments(), api.getPlan()]);
       setCommitments(c.commitments ?? []);
       setPlan(p.plan_items ?? []);
+      setReferenceDate(resolveReferenceDate(p.today));
       setDataError(null);
     } catch (err) {
       const msg =
@@ -120,30 +198,130 @@ export default function App() {
     void load("refresh");
   }, [load]);
 
-  const handlePendingChange = useCallback((changeId: string) => {
-    setModalChangeId(changeId);
-    setModalOpen(true);
+  const rememberPending = useCallback((changeId: string) => {
+    setPendingIds((prev) =>
+      prev.includes(changeId) ? prev : [changeId, ...prev].slice(0, 5),
+    );
   }, []);
 
-  const handleApplied = useCallback(() => {
-    void load("refresh");
-  }, [load]);
+  const forgetPending = useCallback((changeId: string) => {
+    setPendingIds((prev) => prev.filter((id) => id !== changeId));
+  }, []);
 
-  const handleCancelled = useCallback(() => {
-    // Cancellation leaves the plan unchanged; still resync to be certain.
-    void load("refresh");
-  }, [load]);
+  /** Reopen a known proposal: the modal re-reads the live status from the API. */
+  const openProposal = useCallback((changeId: string) => {
+    setModalChangeId(changeId);
+    setModalOpen(true);
+    // Mirror the deep link so a reopened proposal survives a reload exactly like
+    // one opened from ?change=<id>. handleModalClose strips the parameter again.
+    const loc = globalThis.location;
+    if (loc && globalThis.history?.replaceState) {
+      const url = new URL(loc.href);
+      if (url.searchParams.get("change") !== changeId) {
+        url.searchParams.set("change", changeId);
+        globalThis.history.replaceState(null, "", url.toString());
+      }
+    }
+  }, []);
+
+  /** Dismissing the UI must not leave a stale ?change=<id> in the address bar. */
+  const handleModalClose = useCallback(() => {
+    setModalOpen(false);
+    const loc = globalThis.location;
+    if (loc && globalThis.history?.replaceState && loc.search.includes("change=")) {
+      const url = new URL(loc.href);
+      url.searchParams.delete("change");
+      globalThis.history.replaceState(null, "", url.toString());
+    }
+  }, []);
+
+  const handlePendingChange = useCallback(
+    (changeId: string) => {
+      rememberPending(changeId);
+      openProposal(changeId);
+    },
+    [rememberPending, openProposal],
+  );
+
+  // A change is only removed from the device list once the server says it is
+  // no longer pending (applied / cancelled / unknown).
+  const handleStatusObserved = useCallback(
+    (changeId: string, status: string) => {
+      if (status !== "pending") forgetPending(changeId);
+      // "applied" observed without us having applied it here means the server's
+      // data moved, so the dashboard on screen is stale: resync it.
+      if (status === "applied") void load("refresh");
+    },
+    [forgetPending, load],
+  );
+
+  /** The server has no such proposal (404): stop offering it. Any other status
+   *  may be a transient outage, so the id is kept and can be retried. */
+  const handleLoadError = useCallback(
+    (changeId: string, status: number) => {
+      if (status !== 404) return;
+      forgetPending(changeId);
+      setFlash({
+        tone: "info",
+        text: "That proposal id does not exist on the server, so it is no longer listed here.",
+      });
+    },
+    [forgetPending],
+  );
+
+  const handleApplied = useCallback(
+    (result: ApplyChangeResponse) => {
+      forgetPending(result.change_id);
+      const moved = result.commitment;
+      setFlash({
+        tone: "success",
+        text: moved
+          ? `Applied — “${moved.title}” is now due ${moved.due_date} and the plan was refreshed (${result.plan_items.length} steps).`
+          : `Applied — the backend confirmed this change and the plan was refreshed.`,
+      });
+      void load("refresh");
+    },
+    [forgetPending, load],
+  );
+
+  const handleTurnFinished = useCallback(
+    (_res: ChatResponse) => {
+      // A turn may have created or moved commitments; always resync from the API.
+      void load("refresh");
+    },
+    [load],
+  );
+
+  const handleCancelled = useCallback(
+    (changeId: string, _result: CancelChangeResponse) => {
+      forgetPending(changeId);
+      setFlash({
+        tone: "info",
+        text: "Proposal cancelled on the server. Nothing was applied — your plan is unchanged.",
+      });
+      void load("refresh");
+    },
+    [forgetPending, load],
+  );
+
+  // Deep link support: /?change=<id> opens that proposal straight from the API.
+  useEffect(() => {
+    const params = new URLSearchParams(globalThis.location?.search ?? "");
+    const change = params.get("change");
+    if (change) handlePendingChange(change);
+  }, [handlePendingChange]);
 
   const activeCommitments = useMemo(
     () => commitments.filter((c) => c.status === "active"),
     [commitments],
   );
 
-  const today = todayIso();
   const todayItems = useMemo(
-    () => plan.filter((p) => p.planned_date === today),
-    [plan, today],
+    () => plan.filter((p) => p.planned_date === referenceDate),
+    [plan, referenceDate],
   );
+  const browserDate = todayIso();
+  const usingDemoReference = referenceDate !== browserDate;
 
   return (
     <div className="ab-shell">
@@ -170,6 +348,14 @@ export default function App() {
             >
               {item.icon}
               <span>{item.label}</span>
+              {item.id === "assistant" && pendingIds.length > 0 && (
+                <span
+                  className="ab-badge ab-badge--warning"
+                  title={`${pendingIds.length} proposal(s) still awaiting your review`}
+                >
+                  {pendingIds.length}
+                </span>
+              )}
             </button>
           ))}
         </nav>
@@ -183,13 +369,33 @@ export default function App() {
         <header className="ab-topbar">
           <div>
             <h1 className="ab-topbar__title">{VIEW_TITLES[view]}</h1>
-            <div className="ab-topbar__date">{formatLongDate(today)}</div>
+            <div className="ab-topbar__date">
+              {formatLongDate(referenceDate)}
+              {usingDemoReference && (
+                <span
+                  className="ab-badge ab-badge--warning"
+                  style={{ marginLeft: 8 }}
+                  title={`The backend plans against ${referenceDate} (DEMO_TODAY); this device's clock reads ${browserDate}.`}
+                >
+                  demo reference date
+                </span>
+              )}
+            </div>
           </div>
           <div className="ab-topbar__actions">
             {looksOffline(dataError) ? (
               <span className="ab-badge ab-badge--danger">Offline</span>
             ) : (
               <span className="ab-badge">{activeCommitments.length} active</span>
+            )}
+            {pendingIds.length > 0 && (
+              <button
+                type="button"
+                className="ab-btn ab-btn--primary"
+                onClick={() => openProposal(pendingIds[0])}
+              >
+                Review proposal
+              </button>
             )}
             <button
               type="button"
@@ -204,52 +410,83 @@ export default function App() {
         </header>
 
         <div className="ab-content">
-          {view !== "assistant" && loading ? (
-            <LoadingSkeleton />
-          ) : view !== "assistant" && dataError && commitments.length === 0 ? (
-            <ErrorState message={dataError} onRetry={handleRefresh} />
-          ) : (
-            <>
-              {view !== "assistant" && dataError && (
-                <div style={{ marginBottom: 16 }}>
-                  <ErrorState message={dataError} onRetry={handleRefresh} inline />
-                </div>
-              )}
-
-              {view === "today" && (
-                <TodayView
-                  todayItems={todayItems}
-                  commitments={activeCommitments}
-                  planCount={plan.length}
-                />
-              )}
-
-              {view === "upcoming" && <UpcomingView plan={plan} />}
-
-              {view === "conflicts" && <ConflictsView commitments={activeCommitments} />}
-
-              {view === "assistant" && (
-                <div className="ab-card" style={{ height: "calc(100vh - 150px)", overflow: "hidden" }}>
-                  <div className="ab-card__head">
-                    <h2 className="ab-card__title">ActionBridge Assistant</h2>
-                    <span className="ab-card__hint">Grounded in your real, saved plan</span>
-                  </div>
-                  <div className="ab-card__body" style={{ padding: 0, height: "calc(100% - 55px)" }}>
-                    <ChatPanel onPendingChange={handlePendingChange} onAfterTurn={handleApplied} />
-                  </div>
-                </div>
-              )}
-            </>
+          {flash && (
+            <div
+              className={`ab-banner ab-banner--${flash.tone === "success" ? "success" : "info"} ab-flash`}
+              role="status"
+              aria-live="polite"
+            >
+              <span>{flash.text}</span>
+              <button
+                type="button"
+                className="ab-btn ab-btn--sm ab-btn--ghost"
+                onClick={() => setFlash(null)}
+              >
+                Dismiss
+              </button>
+            </div>
           )}
+
+          {view !== "assistant" &&
+            (loading ? (
+              <LoadingSkeleton />
+            ) : dataError && commitments.length === 0 ? (
+              <ErrorState message={dataError} onRetry={handleRefresh} />
+            ) : (
+              <>
+                {dataError && (
+                  <div style={{ marginBottom: 16 }}>
+                    <ErrorState message={dataError} onRetry={handleRefresh} />
+                  </div>
+                )}
+
+                {view === "today" && (
+                  <TodayView
+                    today={referenceDate}
+                    todayItems={todayItems}
+                    commitments={activeCommitments}
+                    planCount={plan.length}
+                  />
+                )}
+
+                {view === "upcoming" && <UpcomingView plan={plan} />}
+
+                {view === "conflicts" && <ConflictsView commitments={activeCommitments} />}
+              </>
+            ))}
+
+          {/* Mounted for the whole life of the page: leaving the Assistant view
+              hides it with display:none instead of destroying the conversation. */}
+          <div
+            className="ab-assistant-slot"
+            style={{ display: view === "assistant" ? "flex" : "none" }}
+          >
+            <div className="ab-card">
+              <div className="ab-card__head">
+                <h2 className="ab-card__title">ActionBridge Assistant</h2>
+                <span className="ab-card__hint">Grounded in your real, saved plan</span>
+              </div>
+              <div className="ab-card__body">
+                <ChatPanel
+                  sessionId={sessionId}
+                  active={view === "assistant"}
+                  onPendingChange={handlePendingChange}
+                  onAfterTurn={handleTurnFinished}
+                />
+              </div>
+            </div>
+          </div>
         </div>
       </main>
 
       <ConfirmModal
         changeId={modalChangeId}
         open={modalOpen}
-        onClose={() => setModalOpen(false)}
+        onClose={handleModalClose}
         onApplied={handleApplied}
         onCancelled={handleCancelled}
+        onStatusObserved={handleStatusObserved}
+        onLoadError={handleLoadError}
       />
     </div>
   );
@@ -291,14 +528,12 @@ function LoadingSkeleton() {
 function ErrorState({
   message,
   onRetry,
-  inline,
 }: {
   message: string;
   onRetry: () => void;
-  inline?: boolean;
 }) {
   return (
-    <div className={`ab-banner ab-banner--error${inline ? "" : ""}`} role="alert">
+    <div className="ab-banner ab-banner--error" role="alert">
       <div style={{ display: "flex", alignItems: "center", gap: 14, width: "100%" }}>
         <span style={{ flex: "1 1 auto" }}>{message}</span>
         <button type="button" className="ab-btn ab-btn--sm" onClick={onRetry}>
@@ -322,10 +557,13 @@ function EmptyState({ title, hint }: { title: string; hint: string }) {
 }
 
 function TodayView({
+  today,
   todayItems,
   commitments,
   planCount,
 }: {
+  /** Reference date the backend plans against (see resolveReferenceDate). */
+  today: string;
   todayItems: PlanItem[];
   commitments: Commitment[];
   planCount: number;
@@ -334,8 +572,8 @@ function TodayView({
     () =>
       [...commitments]
         .sort((a, b) => a.due_date.localeCompare(b.due_date))
-        .find((c) => c.due_date >= todayIso()),
-    [commitments],
+        .find((c) => c.due_date >= today),
+    [commitments, today],
   );
 
   return (
@@ -408,6 +646,12 @@ function TodayView({
                   </div>
                 ))}
               </div>
+              {commitments.length > 6 && (
+                <div className="ab-note" style={{ paddingTop: 10 }}>
+                  Showing the first 6 of {commitments.length} active commitments — every
+                  one is listed in Upcoming and checked by the Assistant.
+                </div>
+              )}
             </>
           )}
         </div>
@@ -557,7 +801,7 @@ function ConflictsView({ commitments }: { commitments: Commitment[] }) {
                 type="button"
                 className="ab-btn ab-btn--primary"
                 onClick={() => void runCheck()}
-                disabled={checking}
+                disabled={checking || !Number(selectedId) || !ISO_DATE_RE.test(targetDate)}
               >
                 {checking ? "Checking…" : "Check conflicts"}
               </button>
@@ -567,6 +811,13 @@ function ConflictsView({ commitments }: { commitments: Commitment[] }) {
               <div className="ab-note" style={{ marginBottom: 10 }}>
                 Checking “{byId.get(selectedId)!.title}” moving from{" "}
                 {byId.get(selectedId)!.due_date} to {targetDate || "…"}.
+                {ISO_DATE_RE.test(targetDate) &&
+                  targetDate === byId.get(selectedId)!.due_date && (
+                    <div>
+                      That is already the current due date, so this preview describes the
+                      schedule as it stands — nothing would move.
+                    </div>
+                  )}
               </div>
             )}
 

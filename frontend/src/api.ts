@@ -9,12 +9,13 @@
  * - Enforces a timeout and supports caller cancellation via AbortSignal.
  * - No secrets, no fake responses, no swallowed errors.
  *
- * Base URL resolution (no config files are modified):
- *   1. `VITE_API_BASE_URL` if the runtime env provides it, else
- *   2. `http://localhost:8000` (the documented FastAPI dev origin; the backend
- *      enables CORS for `*`). Endpoints are appended as `/api/...`, so if a
- *      Vite dev proxy is added later it works simply by setting
- *      `VITE_API_BASE_URL=""` (same-origin) without touching this file.
+ * Base URL resolution (no secrets, no backend changes):
+ *   1. `VITE_API_BASE_URL` if the runtime env provides it (set it to "" to force
+ *      same-origin requests through the Vite `/api` proxy), else
+ *   2. `http://<page host>:8000` — the documented FastAPI dev origin. A browser
+ *      can resolve "localhost" to ::1 while uvicorn listens on IPv4 127.0.0.1,
+ *      which fails to connect, so localhost is pinned to 127.0.0.1 here.
+ *      Backend CORS is `*`, so the direct call works without any proxy.
  */
 
 import type {
@@ -23,11 +24,16 @@ import type {
   ChangeDetail,
   ChatRequest,
   ChatResponse,
+  Commitment,
   CommitmentsQuery,
   CommitmentsResponse,
+  Conflict,
   ConflictsQuery,
   ConflictsResponse,
+  MovedItem,
+  PlanItem,
   PlanResponse,
+  ToolCall,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -41,9 +47,22 @@ function readEnvBase(): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+/** Host of the page we are running in, or null outside a browser. */
+function pageHost(): string | null {
+  const loc = (globalThis as { location?: { hostname?: string } }).location;
+  return typeof loc?.hostname === "string" && loc.hostname ? loc.hostname : null;
+}
+
+function fallbackBase(): string {
+  const host = pageHost();
+  if (!host) return "http://localhost:8000";
+  // Pin the loopback name to IPv4: uvicorn's documented bind is 127.0.0.1:8000.
+  const pinned = host === "localhost" || host === "::1" || host === "[::1]" ? "127.0.0.1" : host;
+  return `http://${pinned}:8000`;
+}
+
 const RAW_BASE = readEnvBase();
-const API_BASE: string =
-  RAW_BASE !== undefined ? stripTrailingSlash(RAW_BASE) : "http://localhost:8000";
+const API_BASE: string = RAW_BASE !== undefined ? stripTrailingSlash(RAW_BASE) : fallbackBase();
 
 function stripTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
@@ -199,12 +218,152 @@ async function extractErrorDetail(response: Response): Promise<string> {
   if (!text) return fallback;
   try {
     const parsed = JSON.parse(text) as { detail?: unknown };
+    // FastAPI answers request-validation failures with detail: [{loc, msg, ...}]
+    // instead of a sentence, so it must be flattened before it reaches the UI.
+    if (Array.isArray(parsed.detail)) return formatValidationIssues(parsed.detail);
     if (typeof parsed.detail === "string" && parsed.detail.trim()) return parsed.detail;
     if (parsed.detail !== undefined) return JSON.stringify(parsed.detail);
   } catch {
     // Not JSON; use a truncated raw body so we never lose the server's message.
   }
   return text.slice(0, 300);
+}
+
+/**
+ * Turn FastAPI's structured 422 entries into one readable sentence.
+ * Raw JSON is never shown to a user, and nothing is invented: only the
+ * server's own field name and message are re-used.
+ */
+function formatValidationIssues(items: unknown[]): string {
+  const parts = items.map((raw) => {
+    const item = asRecord(raw);
+    const loc = Array.isArray(item.loc) ? item.loc.map(String) : [];
+    const field = loc.filter((p) => p !== "body" && p !== "query").slice(-1)[0] ?? "request";
+    const msg = asString(item.msg, "was not accepted").toLowerCase();
+    return `${field} ${msg}`;
+  });
+  return parts.length
+    ? `The backend rejected the request (${parts.join("; ")}).`
+    : "The backend rejected the request.";
+}
+
+// ---------------------------------------------------------------------------
+// Defensive response shaping
+// ---------------------------------------------------------------------------
+
+/**
+ * The types above describe the contract the current backend really implements.
+ * A half-deployed or changed server must never be able to crash a render, so
+ * every response is shaped at runtime: arrays stay arrays, strings stay
+ * strings, and an absent optional value becomes an honest empty value rather
+ * than a fabricated one. Shaping never invents success.
+ */
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function asString(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function asNumber(value: unknown, fallback = 0): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function asArray<T>(value: unknown, shape: (item: unknown) => T): T[] {
+  return Array.isArray(value) ? value.map(shape) : [];
+}
+
+function shapeToolCall(raw: unknown): ToolCall {
+  const r = asRecord(raw);
+  return { name: asString(r.name, "unknown_tool"), input: asRecord(r.input), status: asString(r.status, "error") };
+}
+
+function shapeCommitment(raw: unknown): Commitment | null {
+  if (raw === null || raw === undefined) return null;
+  const r = asRecord(raw);
+  if (typeof r.title !== "string" && r.id === undefined) return null;
+  return {
+    id: asNumber(r.id),
+    title: asString(r.title),
+    type: asString(r.type),
+    due_date: asString(r.due_date),
+    priority: typeof r.priority === "string" ? r.priority : null,
+    status: asString(r.status),
+    created_at: asString(r.created_at),
+  };
+}
+
+function shapePlanItem(raw: unknown): PlanItem {
+  const r = asRecord(raw);
+  return {
+    id: asNumber(r.id),
+    commitment_id: asNumber(r.commitment_id),
+    title: asString(r.title),
+    planned_date: asString(r.planned_date),
+    status: asString(r.status),
+    created_at: asString(r.created_at),
+  };
+}
+
+function shapeConflict(raw: unknown): Conflict {
+  const r = asRecord(raw);
+  return {
+    type: asString(r.type, "unknown"),
+    commitment_id: asNumber(r.commitment_id),
+    title: asString(r.title),
+    due_date: asString(r.due_date),
+    reason: asString(r.reason),
+  };
+}
+
+function shapeMovedItem(raw: unknown): MovedItem {
+  const r = asRecord(raw);
+  return {
+    commitment_id: asNumber(r.commitment_id),
+    title: asString(r.title),
+    from: asString(r.from),
+    to: asString(r.to),
+    reason: asString(r.reason),
+  };
+}
+
+function shapeChat(raw: unknown): ChatResponse {
+  const r = asRecord(raw);
+  const pending = r.pending_change_id;
+  return {
+    reply: asString(r.reply),
+    pending_change_id: typeof pending === "string" && pending.length > 0 ? pending : null,
+    tool_calls: asArray(r.tool_calls, shapeToolCall),
+  };
+}
+
+function shapeChangeDetail(raw: unknown): ChangeDetail {
+  const r = asRecord(raw);
+  return {
+    change_id: asString(r.change_id),
+    status: asString(r.status, "unknown"),
+    summary: asString(r.summary),
+    commitment_id: asNumber(r.commitment_id),
+    old_due_date: asString(r.old_due_date),
+    new_due_date: asString(r.new_due_date),
+    moved: asArray(r.moved, shapeMovedItem),
+    added: Array.isArray(r.added) ? r.added : [],
+    removed: Array.isArray(r.removed) ? r.removed : [],
+  };
+}
+
+function shapeApplyResponse(raw: unknown): ApplyChangeResponse {
+  const r = asRecord(raw);
+  return {
+    change_id: asString(r.change_id),
+    status: asString(r.status, "unknown"),
+    summary: asString(r.summary),
+    commitment: shapeCommitment(r.commitment),
+    plan_items: asArray(r.plan_items, shapePlanItem),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -214,59 +373,73 @@ async function extractErrorDetail(response: Response): Promise<string> {
 export const api = {
   /** POST /api/chat */
   chat(payload: ChatRequest, signal?: AbortSignal): Promise<ChatResponse> {
-    return request<ChatResponse>("/api/chat", {
+    return request<unknown>("/api/chat", {
       method: "POST",
       body: payload,
       timeoutMs: CHAT_TIMEOUT_MS,
       signal,
-    });
+    }).then(shapeChat);
   },
 
   /** GET /api/commitments */
   getCommitments(query: CommitmentsQuery = {}, signal?: AbortSignal): Promise<CommitmentsResponse> {
-    return request<CommitmentsResponse>(
+    return request<unknown>(
       "/api/commitments",
       { method: "GET", signal },
       { status: query.status, title_query: query.title_query },
-    );
+    ).then((raw) => ({
+      commitments: asArray(asRecord(raw).commitments, (item) => shapeCommitment(item)).filter(
+        (c): c is Commitment => c !== null,
+      ),
+    }));
   },
 
   /** GET /api/plan */
   getPlan(signal?: AbortSignal): Promise<PlanResponse> {
-    return request<PlanResponse>("/api/plan", { method: "GET", signal });
+    return request<unknown>("/api/plan", { method: "GET", signal }).then((raw) => {
+      const r = asRecord(raw);
+      const today = r.today;
+      return {
+        plan_items: asArray(r.plan_items, shapePlanItem),
+        ...(typeof today === "string" && /^\d{4}-\d{2}-\d{2}$/.test(today) ? { today } : {}),
+      };
+    });
   },
 
   /** GET /api/conflicts — contextual "what-if" check (both params required). */
   getConflicts(params: ConflictsQuery, signal?: AbortSignal): Promise<ConflictsResponse> {
-    return request<ConflictsResponse>(
+    return request<unknown>(
       "/api/conflicts",
       { method: "GET", signal },
       { commitment_id: params.commitment_id, new_due_date: params.new_due_date },
-    );
+    ).then((raw) => ({ conflicts: asArray(asRecord(raw).conflicts, shapeConflict) }));
   },
 
   /** GET /api/changes/{id} */
   getChange(changeId: string, signal?: AbortSignal): Promise<ChangeDetail> {
-    return request<ChangeDetail>(`/api/changes/${encodeURIComponent(changeId)}`, {
+    return request<unknown>(`/api/changes/${encodeURIComponent(changeId)}`, {
       method: "GET",
       signal,
-    });
+    }).then(shapeChangeDetail);
   },
 
   /** POST /api/changes/{id}/apply — HUMAN confirmation boundary. */
   applyChange(changeId: string, signal?: AbortSignal): Promise<ApplyChangeResponse> {
-    return request<ApplyChangeResponse>(
+    return request<unknown>(
       `/api/changes/${encodeURIComponent(changeId)}/apply`,
       { method: "POST", signal },
-    );
+    ).then((raw) => shapeApplyResponse({ change_id: changeId, ...asRecord(raw) }));
   },
 
   /** POST /api/changes/{id}/cancel — HUMAN confirmation boundary. */
   cancelChange(changeId: string, signal?: AbortSignal): Promise<CancelChangeResponse> {
-    return request<CancelChangeResponse>(
+    return request<unknown>(
       `/api/changes/${encodeURIComponent(changeId)}/cancel`,
       { method: "POST", signal },
-    );
+    ).then((raw) => {
+      const r = asRecord(raw);
+      return { change_id: asString(r.change_id, changeId), status: asString(r.status, "unknown") };
+    });
   },
 };
 
