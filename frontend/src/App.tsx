@@ -212,6 +212,16 @@ export default function App() {
   const openProposal = useCallback((changeId: string) => {
     setModalChangeId(changeId);
     setModalOpen(true);
+    // Mirror the deep link so a reopened proposal survives a reload exactly like
+    // one opened from ?change=<id>. handleModalClose strips the parameter again.
+    const loc = globalThis.location;
+    if (loc && globalThis.history?.replaceState) {
+      const url = new URL(loc.href);
+      if (url.searchParams.get("change") !== changeId) {
+        url.searchParams.set("change", changeId);
+        globalThis.history.replaceState(null, "", url.toString());
+      }
+    }
   }, []);
 
   /** Dismissing the UI must not leave a stale ?change=<id> in the address bar. */
@@ -798,6 +808,13 @@ function ConflictsView({ commitments }: { commitments: Commitment[] }) {
               <div className="ab-note" style={{ marginBottom: 10 }}>
                 Checking “{byId.get(selectedId)!.title}” moving from{" "}
                 {byId.get(selectedId)!.due_date} to {targetDate || "…"}.
+                {ISO_DATE_RE.test(targetDate) &&
+                  targetDate === byId.get(selectedId)!.due_date && (
+                    <div>
+                      That is already the current due date, so this preview describes the
+                      schedule as it stands — nothing would move.
+                    </div>
+                  )}
               </div>
             )}
 

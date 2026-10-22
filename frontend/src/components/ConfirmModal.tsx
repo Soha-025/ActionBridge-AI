@@ -243,7 +243,13 @@ export default function ConfirmModal({
 
               <div>
                 <div className="ab-card__hint" style={{ marginBottom: 6 }}>
-                  Summary
+                  {change.status === "pending"
+                    ? "Summary"
+                    : // The backend stores this text when the proposal is created and
+                      // never rewrites it, so an applied/cancelled record still says
+                      // "pending confirmation". Label it as history instead of editing
+                      // the server's words.
+                      `Summary recorded when this was proposed (server status now: ${change.status})`}
                 </div>
                 <p style={{ margin: 0, fontSize: 14, lineHeight: 1.5 }}>{change.summary}</p>
               </div>
