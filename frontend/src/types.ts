@@ -168,7 +168,40 @@ export interface ConflictsQuery {
 /**
  * FastAPI error body. Every non-2xx response from the backend is
  * `{ "detail": "<message>" }`, so api.ts surfaces `detail` as the message.
+ * (422 validation failures carry `detail` as an ARRAY; api.ts flattens it.)
  */
 export interface ApiErrorBody {
   detail?: string;
+}
+
+// ---------------------------------------------------------------------------
+// M5 dashboard-panel integration contract
+// ---------------------------------------------------------------------------
+
+/**
+ * Props M1 will pass when mounting the M5-owned panels
+ * (`TodayPlan.tsx`, `CommitmentsPanel.tsx`, `ConflictsPanel.tsx`). They are
+ * declared here because M1 owns this type file and M5 owns the component
+ * internals: the panels must not fetch, derive or mutate anything themselves,
+ * and M1 supplies already-loaded, already-filtered data from the real API.
+ *
+ * STATUS: those three files are currently 0 bytes, so App.tsx renders its own
+ * equivalent views; importing the empty modules would break the build. Once M5
+ * lands them, App swaps its views for these components with no API changes.
+ */
+export interface TodayPlanProps {
+  /** ISO date the backend plans against (see `resolveReferenceDate` in App). */
+  today: string;
+  /** Plan items already filtered to `planned_date === today`. */
+  items: PlanItem[];
+}
+
+export interface CommitmentsPanelProps {
+  /** Commitments already filtered to `status === "active"`. */
+  commitments: Commitment[];
+}
+
+export interface ConflictsPanelProps {
+  /** Conflicts from a real `GET /api/conflicts` call for one proposed move. */
+  conflicts: Conflict[];
 }

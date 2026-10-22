@@ -56,14 +56,15 @@ No backend, no `DEMO_FALLBACK`, no network.
 
 | Command | Result observed here |
 | --- | --- |
-| `npm run build` (`tsc --noEmit && vite build`) | **Passed**, exit 0. 40 modules, `dist` 183.5 kB JS / 12.3 kB CSS |
-| `python -m pytest -q` (backend) | **Passed** — 147 passed, 1 non-blocking Starlette deprecation warning |
+| `npm run build` (`tsc --noEmit && vite build`) | **Passed**, exit 0. 40 modules, `dist` 185.4 kB JS / 12.3 kB CSS |
+| `python -m pytest -q` (backend) | **Passed** — 160 passed, 1 non-blocking Starlette deprecation warning |
 | Lint | **Not available** — no linter is configured in `frontend/package.json` |
 | Frontend unit tests | **Not available** — no test runner is configured |
 | Browser console during the whole sweep | clean (only Vite connect debug + React DevTools info) |
 
-The `109 tests passed` line in `docs/test_evidence.md` is older than the current
-suite; the count above is what this checkout produces.
+Run pytest with `backend/.venv` — collection needs `boto3`, which system Python here does
+not have. `docs/test_evidence.md` still quotes 109 tests; that predates both the 147 this
+branch was built on and the 160 that include Member 3's fallback tests.
 
 ## 3. Dashboard UI cases
 
@@ -175,3 +176,43 @@ or 2's agreement first.
 - **Screen-reader walkthrough.** Landmarks, `role="status"`, `role="alert"` and
   visually-hidden labels are in the markup; nobody has listened to it.
 - **Cross-browser.** Only Chromium was exercised.
+
+## 7. Integration with Member 1's `main`
+
+`feature/member-5-dashboard` merges `origin/main` rather than rebasing it, because the
+dashboard commit was already published. Both members' work is present in the result:
+
+| Area | What happened |
+| --- | --- |
+| `App.tsx` | Member 1's deep-link mirroring in `openProposal`, their `applied` → `load("refresh")` resync and their dependency-array fix merged in untouched; my panel mounts replaced their six superseded inline views |
+| `api.ts`, `types.ts` | Auto-merged — Member 1's 422 `formatValidationIssues` and M5 props block sit beside my `hours` shaping |
+| `ConfirmModal.tsx` | Entirely Member 1's; my QA re-ran the apply flow against their version |
+| `package-lock.json` | Member 1's version kept verbatim. `package.json` is byte-identical on both branches and both lockfiles resolve the same 116 packages, so nothing was lost — only 14 npm `libc` platform lines differ |
+
+Two user-visible behaviours that lived inside Member 1's deleted inline views were
+re-implemented in **my** files rather than dropped:
+
+- "Next up: …" `role="status"` banner → `CommitmentsPanel.tsx` behind the new opt-in
+  `showNextUp` prop, enabled only on the Today mount.
+- The same-date guard note ("nothing would move") → `ConflictsPanel.tsx`, using
+  `isIsoDate` from `format.ts`.
+
+Post-merge browser evidence, real API mode: `Next up: stats assignment · due Oct 22`
+rendered; selecting a target date equal to the current due date produced the same-date
+note; `/?change=<id>` opened Member 1's modal directly; **Apply changes** persisted
+(`AI quiz` moved to `2026-10-26` in SQLite), closed the modal, stripped `?change=` from the
+address bar and resynced the panel to `due Oct 26 (in 4d)`. Console stayed clean. Demo mode
+still shows its banner, badge and synthetic hours.
+
+### Open question for Member 1
+
+`types.ts` now declares `TodayPlanProps { today, items }`, `CommitmentsPanelProps
+{ commitments }` and `ConflictsPanelProps { conflicts }` with the rule that panels must not
+fetch, while my components require `loading` / `error` / `onRetry` and `ConflictsPanel`
+takes an injected `getConflicts`. The mismatch is not a build problem today: nothing
+consumes those three interfaces, and my modules export same-named props of their own.
+
+It needs a decision I should not make alone, because `GET /api/conflicts` is contextual —
+it requires a `commitment_id` plus a `new_due_date` — so a panel cannot receive an honest
+pre-fetched `conflicts` list. Either Member 1 adopts the real prop shapes, or a thin
+container in `App.tsx` owns the what-if fetch and my panel becomes presentational.

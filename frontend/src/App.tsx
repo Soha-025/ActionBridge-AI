@@ -209,6 +209,16 @@ export default function App() {
   const openProposal = useCallback((changeId: string) => {
     setModalChangeId(changeId);
     setModalOpen(true);
+    // Mirror the deep link so a reopened proposal survives a reload exactly like
+    // one opened from ?change=<id>. handleModalClose strips the parameter again.
+    const loc = globalThis.location;
+    if (loc && globalThis.history?.replaceState) {
+      const url = new URL(loc.href);
+      if (url.searchParams.get("change") !== changeId) {
+        url.searchParams.set("change", changeId);
+        globalThis.history.replaceState(null, "", url.toString());
+      }
+    }
   }, []);
 
   /** Dismissing the UI must not leave a stale ?change=<id> in the address bar. */
@@ -235,8 +245,11 @@ export default function App() {
   const handleStatusObserved = useCallback(
     (changeId: string, status: string) => {
       if (status !== "pending") forgetPending(changeId);
+      // "applied" observed without us having applied it here means the server's
+      // data moved, so the dashboard on screen is stale: resync it.
+      if (status === "applied") void load("refresh");
     },
-    [forgetPending],
+    [forgetPending, load],
   );
 
   /** The server has no such proposal (404): stop offering it. Any other status
@@ -440,6 +453,7 @@ export default function App() {
                     error={dataError}
                     onRetry={handleRefresh}
                     maxVisible={6}
+                    showNextUp
                   />
                 </div>
               )}

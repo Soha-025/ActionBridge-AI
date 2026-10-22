@@ -10,6 +10,8 @@
  * - Blocks duplicate requests, shows progress, surfaces meaningful errors.
  * - Success is reported only from the server's own response body, never
  *   assumed from a 2xx status or patched together on the client.
+ * - A 409 on Apply/Cancel is treated as "this proposal is no longer pending":
+ *   the modal re-reads the server's record instead of guessing at the outcome.
  * - On successful apply, notifies the parent so the dashboard refreshes.
  * - Closing the modal (X / Esc / backdrop) NEVER cancels the server proposal.
  *   The proposal stays pending and the parent keeps a way to reopen it.
@@ -113,6 +115,23 @@ export default function ConfirmModal({
     [change],
   );
 
+  /**
+   * A 409 means the server already moved this proposal out of "pending" (applied
+   * or cancelled elsewhere, or a double click). Rather than guess which, re-read
+   * the authoritative record from GET /api/changes/{id} and show that.
+   */
+  const resyncAfterRejection = useCallback(async (id: string): Promise<string | null> => {
+    try {
+      const fresh = await api.getChange(id);
+      setChange(fresh);
+      setPhase("ready");
+      onStatusObserved?.(id, fresh.status);
+      return fresh.status;
+    } catch {
+      return null;
+    }
+  }, [onStatusObserved]);
+
   const handleApply = useCallback(async () => {
     if (!changeId || busy !== "idle" || !stillPending) return;
     setBusy("applying");
@@ -133,6 +152,16 @@ export default function ConfirmModal({
       onApplied(result);
       onClose();
     } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        const status = await resyncAfterRejection(changeId);
+        setActionError(
+          status
+            ? `Nothing was applied: the server already recorded this proposal as “${status}”. The details shown now come from the server.`
+            : `The backend rejected this apply (409) and its current status could not be read. Your plan is unchanged.`,
+        );
+        setBusy("idle");
+        return;
+      }
       setActionError(
         err instanceof ApiError
           ? `Could not apply the change: ${err.message}`
@@ -140,7 +169,7 @@ export default function ConfirmModal({
       );
       setBusy("idle");
     }
-  }, [changeId, busy, stillPending, onApplied, onClose, onStatusObserved]);
+  }, [changeId, busy, stillPending, onApplied, onClose, onStatusObserved, resyncAfterRejection]);
 
   const handleCancel = useCallback(async () => {
     if (!changeId || busy !== "idle") return;
@@ -160,6 +189,16 @@ export default function ConfirmModal({
       onCancelled(changeId, result);
       onClose();
     } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        const status = await resyncAfterRejection(changeId);
+        setActionError(
+          status
+            ? `Nothing to cancel: the server already recorded this proposal as “${status}”.`
+            : `The backend rejected this cancel (409) and its current status could not be read.`,
+        );
+        setBusy("idle");
+        return;
+      }
       setActionError(
         err instanceof ApiError
           ? `Could not cancel the proposal: ${err.message}`
@@ -167,7 +206,7 @@ export default function ConfirmModal({
       );
       setBusy("idle");
     }
-  }, [changeId, busy, onCancelled, onClose, onStatusObserved]);
+  }, [changeId, busy, onCancelled, onClose, onStatusObserved, resyncAfterRejection]);
 
   if (!open || !changeId) return null;
 
@@ -243,7 +282,13 @@ export default function ConfirmModal({
 
               <div>
                 <div className="ab-card__hint" style={{ marginBottom: 6 }}>
-                  Summary
+                  {change.status === "pending"
+                    ? "Summary"
+                    : // The backend stores this text when the proposal is created and
+                      // never rewrites it, so an applied/cancelled record still says
+                      // "pending confirmation". Label it as history instead of editing
+                      // the server's words.
+                      `Summary recorded when this was proposed (server status now: ${change.status})`}
                 </div>
                 <p style={{ margin: 0, fontSize: 14, lineHeight: 1.5 }}>{change.summary}</p>
               </div>

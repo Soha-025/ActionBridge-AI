@@ -218,12 +218,33 @@ async function extractErrorDetail(response: Response): Promise<string> {
   if (!text) return fallback;
   try {
     const parsed = JSON.parse(text) as { detail?: unknown };
+    // FastAPI answers request-validation failures with detail: [{loc, msg, ...}]
+    // instead of a sentence, so it must be flattened before it reaches the UI.
+    if (Array.isArray(parsed.detail)) return formatValidationIssues(parsed.detail);
     if (typeof parsed.detail === "string" && parsed.detail.trim()) return parsed.detail;
     if (parsed.detail !== undefined) return JSON.stringify(parsed.detail);
   } catch {
     // Not JSON; use a truncated raw body so we never lose the server's message.
   }
   return text.slice(0, 300);
+}
+
+/**
+ * Turn FastAPI's structured 422 entries into one readable sentence.
+ * Raw JSON is never shown to a user, and nothing is invented: only the
+ * server's own field name and message are re-used.
+ */
+function formatValidationIssues(items: unknown[]): string {
+  const parts = items.map((raw) => {
+    const item = asRecord(raw);
+    const loc = Array.isArray(item.loc) ? item.loc.map(String) : [];
+    const field = loc.filter((p) => p !== "body" && p !== "query").slice(-1)[0] ?? "request";
+    const msg = asString(item.msg, "was not accepted").toLowerCase();
+    return `${field} ${msg}`;
+  });
+  return parts.length
+    ? `The backend rejected the request (${parts.join("; ")}).`
+    : "The backend rejected the request.";
 }
 
 // ---------------------------------------------------------------------------

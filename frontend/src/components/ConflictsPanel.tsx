@@ -220,6 +220,12 @@ export default function ConflictsPanel({
               <div className="ab-note" style={{ marginBottom: 10 }}>
                 Checking “{selected.title}” moving from {selected.due_date} to{" "}
                 {targetDate || "…"}.
+                {isIsoDate(targetDate) && targetDate === selected.due_date && (
+                  <div>
+                    That is already the current due date, so this preview describes the schedule
+                    as it stands — nothing would move.
+                  </div>
+                )}
               </div>
             )}
 

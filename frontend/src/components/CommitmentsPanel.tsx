@@ -16,6 +16,7 @@ import {
   compareByDeadline,
   describeDeadline,
   dayDiff,
+  formatDateShort,
   isCompletedStatus,
   priorityTone,
   statusTone,
@@ -32,6 +33,12 @@ export interface CommitmentsPanelProps {
   title?: string;
   /** Cap the visible rows (Today view). Omitted = show all, as in Upcoming. */
   maxVisible?: number;
+  /**
+   * Show the soonest still-open deadline. Member 1's inline Today view offered
+   * this callout, so the Today mount keeps it; a full "all commitments" list
+   * does not need a single next-up pointer.
+   */
+  showNextUp?: boolean;
 }
 
 function CommitmentRow({ item, today }: { item: Commitment; today: string }) {
@@ -71,8 +78,14 @@ export default function CommitmentsPanel({
   onRetry,
   title = "Commitments",
   maxVisible,
+  showNextUp = false,
 }: CommitmentsPanelProps) {
   const sorted = useMemo(() => [...commitments].sort(compareByDeadline), [commitments]);
+
+  const nextUp = useMemo(
+    () => sorted.find((item) => !isCompletedStatus(item.status) && item.due_date >= today),
+    [sorted, today],
+  );
 
   const overdueCount = sorted.filter(
     (item) => !isCompletedStatus(item.status) && (dayDiff(today, item.due_date) ?? 0) < 0,
@@ -115,6 +128,14 @@ export default function CommitmentsPanel({
                 <div>
                   {overdueCount} commitment{overdueCount === 1 ? " is" : "s are"} past due. Reschedule
                   them with the Assistant to rebuild the plan.
+                </div>
+              </div>
+            )}
+            {showNextUp && nextUp && (
+              <div className="ab-banner ab-banner--info" style={{ marginBottom: 12 }} role="status">
+                <div>
+                  Next up: <strong>{nextUp.title || `Commitment #${nextUp.id}`}</strong> · due{" "}
+                  {formatDateShort(nextUp.due_date)}
                 </div>
               </div>
             )}

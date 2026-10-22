@@ -38,8 +38,15 @@ These results reflect local checks performed so far. Pending items must be teste
 Full commands, reproduction steps and the unverified list: `docs/dashboard_qa.md`.
 
 - Frontend build: `npm run build` (`tsc --noEmit && vite build`) — **passed**, exit 0.
-- Backend suite re-run on this checkout: `python -m pytest -q` — **147 passed**, 1 non-blocking warning.
-  (Supersedes the 109 in section 1; the suite has grown since that entry.)
+- Backend suite re-run on this checkout: `python -m pytest -q` — **160 passed**, 1 non-blocking warning.
+  (Supersedes the 109 in section 1: 147 on this branch's base, 160 after Member 3's fallback
+  tests arrived with the integration merge below. Use `backend/.venv` — collection needs boto3.)
+- Integration merge of `origin/main` into `feature/member-5-dashboard` — **passed**. Member 1's
+  deep-link mirroring, `applied` → resync and 422 error flattening are preserved; their six
+  superseded inline views were replaced by the M5 panels, and the two behaviours unique to
+  those views ("Next up" banner, same-date guard note) were re-implemented in the panels.
+  Re-verified in the browser: `?change=<id>` opens the modal, Apply persists to SQLite, strips
+  the URL parameter and refreshes the dashboard. Details in `docs/dashboard_qa.md` §7.
 - Lint / frontend unit tests: **not available** — neither is configured in `frontend/package.json`.
 - Browser check of all three panels in both modes (real API + `VITE_DEMO_MODE`): load, multiple
   rows, completed vs pending, priority, deadline, empty, error+retry, conflict→plan-step matching,

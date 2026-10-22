@@ -14,9 +14,12 @@ tool-use, multi-round agent loop — it does NOT bypass anything.
 
 It is intentionally dumb and transparent:
 
-  * It only understands the four ActionBridge demo intents (create
-    commitments, "what should I work on today?", change a deadline, and a
-    confirmation like "apply it"). Anything else gets a helpful canned reply.
+  * It understands the ActionBridge demo intents -- create commitments, "what
+    should I work on today?", a timing/schedule follow-up once a plan exists
+    ("timings?", "what time?", "when should I do these?"), change a deadline,
+    and a confirmation like "apply it". Anything else gets a helpful canned
+    reply. The timing follow-up reuses the SAME create_plan tool flow and only
+    reports the real day/date values; it never invents clock times.
   * It ONLY ever emits the five model-facing tool calls. It never emits
     ``apply_changes`` / ``cancel_change`` / ``get_change`` -- and those are
     already unreachable through the agent's structural allowlist anyway.
@@ -72,6 +75,27 @@ _CONFIRM_WORDS = {
     "do it", "go ahead", "apply it", "apply", "confirm",
     "confirm it", "yes please", "please apply",
 }
+
+# Simple timing/schedule follow-up questions asked AFTER a plan already exists.
+# Deliberately narrow so it never shadows the create/deadline/today-plan intents.
+_TIMING_PATTERNS = (
+    r"\btimings?\b",
+    r"\bwhat\s+time\b",
+    r"\bwhat\s+times?\b",
+    r"\bwhat\s+are\s+the\s+times?\b",
+    r"\bany\s+times?\b",
+    r"\bwhen\s+should\s+i\b",
+    r"\bwhen\s+do\s+i\b",
+    r"\bwhen\s+are\s+(?:these|they|my|the)\b",
+)
+
+_WEEKDAY_NAMES = (
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+)
+
+
+def _looks_like_timing(low: str) -> bool:
+    return any(re.search(p, low) for p in _TIMING_PATTERNS)
 
 
 def _today() -> date:
@@ -133,6 +157,8 @@ class DemoProvider(LLMProvider):
             return self._create_commitments(req_text, executed, names_done)
         if intent == "today_plan":
             return self._today_plan(executed, names_done)
+        if intent == "timing_followup":
+            return self._timing_followup(executed, names_done)
         if intent == "apply_confirm":
             return self._apply_confirm()
         return self._final(
@@ -235,6 +261,63 @@ class DemoProvider(LLMProvider):
             "\nWork top-to-bottom; the earliest deadline comes first."
         )
 
+    def _timing_followup(self, executed, names_done):
+        # Reuse the SAME create_plan tool flow to read the authoritative plan.
+        if "create_plan" not in names_done:
+            return self._tool_turn([self._tool_use("create_plan", {})])
+
+        plan_entry = next((e for e in executed if e["name"] == "create_plan"), None)
+        res = (plan_entry or {}).get("result") or {}
+        items = res.get("plan_items") if isinstance(res, dict) else None
+        items = items or []
+        if not items:
+            return self._final(
+                "There's no plan to give timings for yet. Add a commitment and "
+                "ask 'what should I work on today?' first, then I can lay out "
+                "the schedule."
+            )
+
+        def _clock_time(p):
+            # Return real clock-time info ONLY if the plan actually stores it.
+            for key in ("planned_time", "time", "start_time", "clock_time"):
+                val = p.get(key)
+                if val:
+                    return val
+            return None
+
+        timed = [p for p in items if _clock_time(p)]
+        if timed:
+            lines = [
+                f"  {i}. {p.get('title', '?')} — {self._describe_day(p.get('planned_date'))}"
+                + (f" at {_clock_time(p)}" if _clock_time(p) else " (time not set)")
+                for i, p in enumerate(items, 1)
+            ]
+            return self._final(
+                "Here are the scheduled times for your plan:\n" + "\n".join(lines)
+            )
+
+        # Day/date only, no clock times anywhere: be honest, do NOT invent times.
+        lines = [
+            f"  {i}. {p.get('title', '?')} — {self._describe_day(p.get('planned_date'))}"
+            for i, p in enumerate(items, 1)
+        ]
+        return self._final(
+            "ActionBridge has scheduled these by day/date, but no specific "
+            "clock times have been assigned yet — so you can pick the hours "
+            "that suit you. Here's the current order:\n" + "\n".join(lines) +
+            "\nAsk me to reschedule any of them if a day doesn't work."
+        )
+
+    @staticmethod
+    def _describe_day(iso) -> str:
+        if not iso:
+            return "date not set"
+        try:
+            d = date.fromisoformat(str(iso).strip())
+        except ValueError:
+            return str(iso)
+        return f"{_WEEKDAY_NAMES[d.weekday()]} {d.isoformat()}"
+
     def _deadline_change(self, req_text, executed, names_done):
         new_date = self._new_due_date(req_text)
         target = self._change_target(req_text)
@@ -307,6 +390,8 @@ class DemoProvider(LLMProvider):
             return "create_commitments"
         if re.search(r"\b(today|tonight|plan|prioriti[sz]e|work on|what should|study)\b", low):
             return "today_plan"
+        if _looks_like_timing(low):
+            return "timing_followup"
         return "unknown"
 
     @staticmethod
