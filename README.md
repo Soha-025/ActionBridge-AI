@@ -48,7 +48,7 @@ The project is being developed for the \*\*Amazon Alexa+ Hackathon\*\*.
 
 | AWS SDK | Boto3 |
 
-| Frontend | React, Vite, TypeScript, Tailwind CSS — planned project stack |
+| Frontend | React, Vite, TypeScript, plain CSS |
 
 
 
@@ -104,7 +104,7 @@ ActionBridge-AI/
 
 \- Access to an Amazon Bedrock model that supports tool use, for AI-powered chat.
 
-\- Node.js and npm will be needed when the frontend is implemented.
+\- Node.js and npm are required to install dependencies and run the React/Vite frontend.
 
 
 
@@ -300,7 +300,7 @@ python -m pytest -q
 
 
 
-The current development checkout has passed \*\*109 tests\*\*, with one non-fatal deprecation warning. Run the tests again after making changes.
+The current development checkout passed **160 backend tests** with one non-blocking deprecation warning. The frontend TypeScript check and Vite production build also completed successfully. Re-run both checks after making changes.
 
 
 
