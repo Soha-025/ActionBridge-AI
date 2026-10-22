@@ -20,6 +20,7 @@ Run from backend/:
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -194,6 +195,95 @@ def test_fallback_never_calls_apply_changes(tmp_db, monkeypatch):
     chat("I have a quiz Thursday.")
     chat("My quiz deadline changed from Thursday to Wednesday.")
     chat("Apply it")  # would explode if it tried to apply
+
+
+# ---------------------------------------------------------------------------
+# B2. Timing / schedule follow-ups after a plan exists
+# ---------------------------------------------------------------------------
+
+
+_TIMING_PHRASES = [
+    "timings?",
+    "what time?",
+    "what are the timings?",
+    "schedule timings",
+    "when should I do these?",
+]
+
+
+def _has_fabricated_clock_time(reply: str) -> bool:
+    import re
+    return bool(re.search(r"\b\d{1,2}(:\d{2})?\s?(AM|PM|am|pm|a\.m\.|p\.m\.|o'clock)\b", reply))
+
+
+@pytest.mark.parametrize("phrase", _TIMING_PHRASES)
+def test_timing_followup_is_recognized_and_not_rejected(tmp_db, phrase):
+    _seed_three()
+    result = chat(phrase)
+    # It uses the real plan tool flow (no second planning system).
+    assert "create_plan" in _titles(result)
+    assert all(tc["status"] == "success" for tc in result["tool_calls"])
+    # It answers rather than falling back to the "not part of the demo" reply.
+    assert "isn't part of the offline demo" not in result["reply"]
+    assert "Demo Mode" in result["reply"]
+
+
+@pytest.mark.parametrize("phrase", _TIMING_PHRASES)
+def test_timing_followup_reports_dates_without_fabricating_times(tmp_db, phrase):
+    _seed_three()
+    result = chat(phrase)
+    reply = result["reply"]
+    # Honest: scheduled by day/date, but no clock times assigned yet.
+    assert "no specific" in reply and "clock times" in reply
+    # It summarizes the REAL plan (the seeded dates appear).
+    assert THU in reply and FRI in reply and SAT in reply
+    # No invented hours like 9 AM / 2 PM.
+    assert not _has_fabricated_clock_time(reply)
+
+
+def test_timing_followup_no_plan_guides_user(tmp_db):
+    # No commitments -> empty plan -> honest, does not fabricate a schedule.
+    result = chat("timings?")
+    assert "no plan" in result["reply"].lower()
+    assert "add a commitment" in result["reply"].lower()
+    assert not _has_fabricated_clock_time(result["reply"])
+
+
+def test_timing_followup_preserves_safety(tmp_db):
+    _seed_three()
+    result = chat("when should I do these?")
+    # A timing question never proposes or applies a change.
+    assert result["pending_change_id"] is None
+    assert "propose_replan" not in _titles(result)
+    assert "apply_changes" not in _titles(result)
+    assert _titles(result) <= ALLOWED
+
+
+def test_timing_followup_returns_real_clock_times_if_present():
+    # Provider-level proof (requirement #3): when the plan DOES carry times,
+    # the real values are returned verbatim rather than the 'no clock times'
+    # message. No services needed -- we drive two converse rounds directly.
+    provider = DemoProvider()
+    msgs = [{"role": "user", "content": [{"text": "timings?"}]}]
+    first = provider.converse(msgs, tools=None, system=None)
+    assert first["stop_reason"] == "tool_use"                       # asked for plan
+    assert first["message"]["content"][0]["toolUse"]["name"] == "create_plan"
+    call_id = first["message"]["content"][0]["toolUse"]["toolUseId"]
+    plan = {"plan_items": [
+        {"title": "AI assignment", "planned_date": FRI, "planned_time": "14:00"},
+        {"title": "Statistics quiz", "planned_date": THU, "planned_time": "09:30"},
+    ]}
+    msgs += [
+        {"role": "assistant", "content": first["message"]["content"]},
+        {"role": "user", "content": [{"toolResult": {
+            "toolUseId": call_id, "status": "success",
+            "content": [{"text": json.dumps({"result": plan})}],
+        }}]},
+    ]
+    second = provider.converse(msgs, tools=None, system=None)
+    reply = second["message"]["content"][0]["text"]
+    assert "14:00" in reply and "09:30" in reply                    # real values echoed
+    assert "no specific" not in reply                                # not the date-only branch
 
 
 # ---------------------------------------------------------------------------
