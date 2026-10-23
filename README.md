@@ -99,17 +99,20 @@ Copy `backend/.env.example` to `backend/.env` and set only the variables for the
 
 ---
 
+
+```md
 ## Architecture Overview
+
+![ActionBridge AI Architecture](docs/architecture.png)
 
 ```text
 Frontend (React/Vite/TS)
   → FastAPI (main.py)
-    → ActionBridge Agent (agent.py)            # multi-round tool-use loop
+    → ActionBridge Agent (agent.py)
       → Provider abstraction (Bedrock / Gemini / Demo)
-        → MCP safe tools (mcp_server.py)        # only 5 model-facing tools
+        → MCP safe tools (mcp_server.py)
           → deterministic services (services.py)
             → SQLite (commitments, plan_items, pending_changes)
-```
 
 **Human-confirmation boundary (safety invariant):**
 
