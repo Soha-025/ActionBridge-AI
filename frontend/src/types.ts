@@ -33,6 +33,13 @@ export interface PlanItem {
   planned_date: string;
   status: string;
   created_at: string;
+  /**
+   * Estimated effort in hours. The backend `GET /api/plan` returns this as
+   * `estimated_hours`; `api.ts` shapes it into `hours`. When the field is
+   * absent or non-numeric it stays null and the UI shows no estimate (it is
+   * never fabricated client-side).
+   */
+  hours?: number | null;
 }
 
 /** A conflict produced by the contextual conflict checker. */

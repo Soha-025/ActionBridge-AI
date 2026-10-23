@@ -298,6 +298,9 @@ function shapeCommitment(raw: unknown): Commitment | null {
 
 function shapePlanItem(raw: unknown): PlanItem {
   const r = asRecord(raw);
+  // Backend `/api/plan` returns `estimated_hours`; older/demo fixtures use
+  // `hours`. Accept either so the dashboard's estimated-hours badge renders.
+  const hoursRaw = r.estimated_hours ?? r.hours;
   return {
     id: asNumber(r.id),
     commitment_id: asNumber(r.commitment_id),
@@ -305,6 +308,8 @@ function shapePlanItem(raw: unknown): PlanItem {
     planned_date: asString(r.planned_date),
     status: asString(r.status),
     created_at: asString(r.created_at),
+    // Absent or non-numeric stays null; the UI must not show a made-up estimate.
+    hours: typeof hoursRaw === "number" && Number.isFinite(hoursRaw) ? hoursRaw : null,
   };
 }
 

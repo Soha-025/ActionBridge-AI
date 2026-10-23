@@ -7,11 +7,15 @@ import type {
   CancelChangeResponse,
   ChatResponse,
   Commitment,
-  Conflict,
   PlanItem,
 } from "./types";
 import ChatPanel from "./components/ChatPanel";
 import ConfirmModal from "./components/ConfirmModal";
+import TodayPlan from "./components/TodayPlan";
+import CommitmentsPanel from "./components/CommitmentsPanel";
+import ConflictChecker from "./components/ConflictChecker";
+import { formatLongDate } from "./format";
+import { createDemoSource, DEMO_BANNER_TEXT, isDemoMode } from "./demoData";
 
 type ViewId = "today" | "upcoming" | "conflicts" | "assistant";
 
@@ -120,24 +124,8 @@ function writeStoredPendingIds(ids: string[]): void {
   }
 }
 
-function formatLongDate(iso: string): string {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
-  const d = new Date(`${iso}T00:00:00`);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString(undefined, {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-  });
-}
-
-function formatDateShort(iso: string): string {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
-  const d = new Date(`${iso}T00:00:00`);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
+/** Resolved once: a page is either talking to the backend or to demo data. */
+const DEMO_MODE = isDemoMode();
 
 export default function App() {
   const [view, setView] = useState<ViewId>("today");
@@ -159,6 +147,12 @@ export default function App() {
 
   const [referenceDate, setReferenceDate] = useState(() => resolveReferenceDate());
 
+  // Built once from the mount-time reference date: keeping a stable identity here
+  // is what stops the load effect from re-firing in a loop when it swaps between
+  // the live API and the demo fixtures.
+  const [demoSource] = useState(() => createDemoSource(resolveReferenceDate()));
+  const source = useMemo(() => (DEMO_MODE ? demoSource : api), [demoSource]);
+
   useEffect(() => {
     writeStoredPendingIds(pendingIds);
   }, [pendingIds]);
@@ -169,26 +163,29 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [flash]);
 
-  const load = useCallback(async (mode: "initial" | "refresh") => {
-    if (mode === "initial") setLoading(true);
-    else setRefreshing(true);
-    try {
-      const [c, p] = await Promise.all([api.getCommitments(), api.getPlan()]);
-      setCommitments(c.commitments ?? []);
-      setPlan(p.plan_items ?? []);
-      setReferenceDate(resolveReferenceDate(p.today));
-      setDataError(null);
-    } catch (err) {
-      const msg =
-        err instanceof ApiError
-          ? err.message
-          : "Could not load your dashboard from the backend.";
-      setDataError(msg);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
+  const load = useCallback(
+    async (mode: "initial" | "refresh") => {
+      if (mode === "initial") setLoading(true);
+      else setRefreshing(true);
+      try {
+        const [c, p] = await Promise.all([source.getCommitments(), source.getPlan()]);
+        setCommitments(c.commitments ?? []);
+        setPlan(p.plan_items ?? []);
+        setReferenceDate(resolveReferenceDate(p.today));
+        setDataError(null);
+      } catch (err) {
+        const msg =
+          err instanceof ApiError
+            ? err.message
+            : "Could not load your dashboard from the backend.";
+        setDataError(msg);
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    [source],
+  );
 
   useEffect(() => {
     void load("initial");
@@ -383,7 +380,11 @@ export default function App() {
             </div>
           </div>
           <div className="ab-topbar__actions">
-            {looksOffline(dataError) ? (
+            {DEMO_MODE ? (
+              <span className="ab-badge ab-badge--warning" title={DEMO_BANNER_TEXT}>
+                Demo data
+              </span>
+            ) : looksOffline(dataError) ? (
               <span className="ab-badge ab-badge--danger">Offline</span>
             ) : (
               <span className="ab-badge">{activeCommitments.length} active</span>
@@ -427,33 +428,74 @@ export default function App() {
             </div>
           )}
 
-          {view !== "assistant" &&
-            (loading ? (
-              <LoadingSkeleton />
-            ) : dataError && commitments.length === 0 ? (
-              <ErrorState message={dataError} onRetry={handleRefresh} />
-            ) : (
-              <>
-                {dataError && (
-                  <div style={{ marginBottom: 16 }}>
-                    <ErrorState message={dataError} onRetry={handleRefresh} />
-                  </div>
-                )}
+          {DEMO_MODE && (
+            <div className="ab-banner ab-banner--warning" style={{ marginBottom: 16 }} role="status">
+              <div>{DEMO_BANNER_TEXT}</div>
+            </div>
+          )}
 
-                {view === "today" && (
-                  <TodayView
+          {view !== "assistant" && (
+            <>
+              {view === "today" && (
+                <div className="ab-grid ab-grid--two">
+                  <TodayPlan
+                    items={todayItems}
                     today={referenceDate}
-                    todayItems={todayItems}
-                    commitments={activeCommitments}
-                    planCount={plan.length}
+                    loading={loading}
+                    error={dataError}
+                    onRetry={handleRefresh}
                   />
-                )}
+                  <CommitmentsPanel
+                    title="Upcoming deadlines"
+                    commitments={activeCommitments}
+                    today={referenceDate}
+                    loading={loading}
+                    error={dataError}
+                    onRetry={handleRefresh}
+                    maxVisible={6}
+                    showNextUp
+                  />
+                </div>
+              )}
 
-                {view === "upcoming" && <UpcomingView plan={plan} />}
+              {view === "upcoming" && (
+                <div className="ab-grid ab-grid--two">
+                  <TodayPlan
+                    title="Full plan"
+                    items={plan}
+                    today={referenceDate}
+                    groupByDate
+                    loading={loading}
+                    error={dataError}
+                    onRetry={handleRefresh}
+                    emptyHint="Capture a few commitments with the Assistant to build a plan."
+                  />
+                  <CommitmentsPanel
+                    title="All commitments"
+                    commitments={commitments}
+                    today={referenceDate}
+                    loading={loading}
+                    error={dataError}
+                    onRetry={handleRefresh}
+                  />
+                </div>
+              )}
 
-                {view === "conflicts" && <ConflictsView commitments={activeCommitments} />}
-              </>
-            ))}
+              {view === "conflicts" && (
+                <div style={{ maxWidth: 860 }}>
+                  <ConflictChecker
+                    commitments={activeCommitments}
+                    plan={plan}
+                    today={referenceDate}
+                    loading={loading}
+                    error={dataError}
+                    onRetry={handleRefresh}
+                    getConflicts={source.getConflicts}
+                  />
+                </div>
+              )}
+            </>
+          )}
 
           {/* Mounted for the whole life of the page: leaving the Assistant view
               hides it with display:none instead of destroying the conversation. */}
@@ -497,365 +539,4 @@ export default function App() {
 function looksOffline(message: string | null): boolean {
   // Lightweight heuristic over the normalized ApiError message text.
   return !!message && /cannot reach|timed out/i.test(message);
-}
-
-function LoadingSkeleton() {
-  return (
-    <div className="ab-grid ab-grid--two">
-      <div className="ab-card">
-        <div className="ab-card__head">
-          <div className="ab-skeleton" style={{ width: 160 }} />
-        </div>
-        <div className="ab-card__body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <div className="ab-skeleton" style={{ height: 44 }} />
-          <div className="ab-skeleton" style={{ height: 44 }} />
-          <div className="ab-skeleton" style={{ height: 44 }} />
-        </div>
-      </div>
-      <div className="ab-card">
-        <div className="ab-card__head">
-          <div className="ab-skeleton" style={{ width: 120 }} />
-        </div>
-        <div className="ab-card__body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <div className="ab-skeleton" style={{ height: 30 }} />
-          <div className="ab-skeleton" style={{ height: 30 }} />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ErrorState({
-  message,
-  onRetry,
-}: {
-  message: string;
-  onRetry: () => void;
-}) {
-  return (
-    <div className="ab-banner ab-banner--error" role="alert">
-      <div style={{ display: "flex", alignItems: "center", gap: 14, width: "100%" }}>
-        <span style={{ flex: "1 1 auto" }}>{message}</span>
-        <button type="button" className="ab-btn ab-btn--sm" onClick={onRetry}>
-          Retry
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function EmptyState({ title, hint }: { title: string; hint: string }) {
-  return (
-    <div className="ab-empty">
-      <div className="ab-empty__icon" aria-hidden>
-        🗂️
-      </div>
-      <div style={{ fontWeight: 600, color: "var(--text)" }}>{title}</div>
-      <div style={{ marginTop: 4 }}>{hint}</div>
-    </div>
-  );
-}
-
-function TodayView({
-  today,
-  todayItems,
-  commitments,
-  planCount,
-}: {
-  /** Reference date the backend plans against (see resolveReferenceDate). */
-  today: string;
-  todayItems: PlanItem[];
-  commitments: Commitment[];
-  planCount: number;
-}) {
-  const nextDue = useMemo(
-    () =>
-      [...commitments]
-        .sort((a, b) => a.due_date.localeCompare(b.due_date))
-        .find((c) => c.due_date >= today),
-    [commitments, today],
-  );
-
-  return (
-    <div className="ab-grid ab-grid--two">
-      <section className="ab-card">
-        <div className="ab-card__head">
-          <h2 className="ab-card__title">Today&apos;s focus</h2>
-          <span className="ab-card__hint">{todayItems.length} scheduled</span>
-        </div>
-        <div className="ab-card__body">
-          {todayItems.length === 0 ? (
-            <EmptyState
-              title="Nothing scheduled for today"
-              hint="Ask the Assistant what to work on, or add a commitment. Your plan is built from saved deadlines."
-            />
-          ) : (
-            <div className="ab-list">
-              {todayItems.map((item) => (
-                <div className="ab-row" key={item.id}>
-                  <span className="ab-dot" aria-hidden />
-                  <div className="ab-row__main">
-                    <div className="ab-row__title" title={item.title}>
-                      {item.title}
-                    </div>
-                    <div className="ab-row__meta">
-                      Planned {formatDateShort(item.planned_date)} · {item.status}
-                    </div>
-                  </div>
-                  <span className="ab-badge ab-badge--primary">#{item.commitment_id}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </section>
-
-      <section className="ab-card">
-        <div className="ab-card__head">
-          <h2 className="ab-card__title">Commitments</h2>
-          <span className="ab-card__hint">{planCount} plan steps</span>
-        </div>
-        <div className="ab-card__body">
-          {commitments.length === 0 ? (
-            <EmptyState
-              title="No active commitments"
-              hint="Add one through the Assistant, e.g. “I have a Statistics quiz Thursday.”"
-            />
-          ) : (
-            <>
-              {nextDue && (
-                <div className="ab-banner ab-banner--info" style={{ marginBottom: 12 }} role="status">
-                  <div>
-                    Next up: <strong>{nextDue.title}</strong> · due{" "}
-                    {formatDateShort(nextDue.due_date)}
-                  </div>
-                </div>
-              )}
-              <div className="ab-list">
-                {commitments.slice(0, 6).map((c) => (
-                  <div className="ab-row" key={c.id}>
-                    <div className="ab-row__main">
-                      <div className="ab-row__title" title={c.title}>
-                        {c.title}
-                      </div>
-                      <div className="ab-row__meta">
-                        {c.type} · due {formatDateShort(c.due_date)}
-                        {c.priority ? ` · ${c.priority}` : ""}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              {commitments.length > 6 && (
-                <div className="ab-note" style={{ paddingTop: 10 }}>
-                  Showing the first 6 of {commitments.length} active commitments — every
-                  one is listed in Upcoming and checked by the Assistant.
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function UpcomingView({ plan }: { plan: PlanItem[] }) {
-  const grouped = useMemo(() => {
-    const map = new Map<string, PlanItem[]>();
-    for (const item of [...plan].sort((a, b) => a.planned_date.localeCompare(b.planned_date))) {
-      const arr = map.get(item.planned_date) ?? [];
-      arr.push(item);
-      map.set(item.planned_date, arr);
-    }
-    return Array.from(map.entries());
-  }, [plan]);
-
-  if (plan.length === 0) {
-    return (
-      <section className="ab-card">
-        <div className="ab-card__body">
-          <EmptyState
-            title="Your plan is empty"
-            hint="Capture a few commitments with the Assistant to build a plan."
-          />
-        </div>
-      </section>
-    );
-  }
-
-  return (
-    <section className="ab-card">
-      <div className="ab-card__head">
-        <h2 className="ab-card__title">Full plan</h2>
-        <span className="ab-card__hint">{plan.length} steps</span>
-      </div>
-      <div className="ab-card__body">
-        {grouped.map(([date, items]) => (
-          <div key={date} style={{ marginBottom: 8 }}>
-            <div className="ab-card__hint" style={{ padding: "10px 4px 4px" }}>
-              {formatLongDate(date)}
-            </div>
-            <div className="ab-list">
-              {items.map((item) => (
-                <div className="ab-row" key={item.id}>
-                  <span className="ab-dot" aria-hidden />
-                  <div className="ab-row__main">
-                    <div className="ab-row__title" title={item.title}>
-                      {item.title}
-                    </div>
-                    <div className="ab-row__meta">{item.status}</div>
-                  </div>
-                  <span className="ab-badge ab-mono">{formatDateShort(date)}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function ConflictsView({ commitments }: { commitments: Commitment[] }) {
-  const [selectedId, setSelectedId] = useState<string>("");
-  const [targetDate, setTargetDate] = useState<string>("");
-  const [checking, setChecking] = useState(false);
-  const [result, setResult] = useState<
-    { status: "idle" | "ok" | "error"; message?: string; conflicts?: Conflict[] }
-  >({ status: "idle" });
-
-  const runCheck = useCallback(async () => {
-    const commitmentId = Number(selectedId);
-    if (!commitmentId || !/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) {
-      setResult({
-        status: "error",
-        message: "Pick a commitment and enter a valid target date (YYYY-MM-DD).",
-      });
-      return;
-    }
-    setChecking(true);
-    try {
-      const res = await api.getConflicts({ commitment_id: commitmentId, new_due_date: targetDate });
-      setResult({ status: "ok", conflicts: res.conflicts ?? [] });
-    } catch (err) {
-      setResult({
-        status: "error",
-        message: err instanceof ApiError ? err.message : "Conflict check failed.",
-      });
-    } finally {
-      setChecking(false);
-    }
-  }, [selectedId, targetDate]);
-
-  const byId = useMemo(() => new Map(commitments.map((c) => [String(c.id), c])), [commitments]);
-
-  return (
-    <section className="ab-card" style={{ maxWidth: 760 }}>
-      <div className="ab-card__head">
-        <h2 className="ab-card__title">Conflict check</h2>
-        <span className="ab-card__hint">Preview pressure before you commit to a move</span>
-      </div>
-      <div className="ab-card__body">
-        <p className="ab-note" style={{ marginTop: 0 }}>
-          The backend detects conflicts <em>for a proposed move</em> (a commitment plus a new
-          due date). Choose a commitment and a target date to run a real check. The Assistant
-          runs this automatically whenever you change a deadline.
-        </p>
-
-        {commitments.length === 0 ? (
-          <EmptyState
-            title="No commitments to check"
-            hint="Add a commitment first, then preview how rescheduling it affects your week."
-          />
-        ) : (
-          <>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "flex-end", margin: "12px 0" }}>
-              <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 13, flex: "1 1 260px" }}>
-                <span style={{ color: "var(--text-muted)" }}>Commitment</span>
-                <select
-                  className="ab-chat__textarea"
-                  style={{ minHeight: 42, padding: "8px 12px" }}
-                  value={selectedId}
-                  onChange={(e) => setSelectedId(e.target.value)}
-                >
-                  <option value="">Select a commitment…</option>
-                  {commitments.map((c) => (
-                    <option key={c.id} value={String(c.id)}>
-                      {c.title} (due {c.due_date})
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 13 }}>
-                <span style={{ color: "var(--text-muted)" }}>New due date</span>
-                <input
-                  className="ab-chat__textarea"
-                  style={{ minHeight: 42, padding: "8px 12px" }}
-                  type="date"
-                  value={targetDate}
-                  onChange={(e) => setTargetDate(e.target.value)}
-                />
-              </label>
-              <button
-                type="button"
-                className="ab-btn ab-btn--primary"
-                onClick={() => void runCheck()}
-                disabled={checking || !Number(selectedId) || !ISO_DATE_RE.test(targetDate)}
-              >
-                {checking ? "Checking…" : "Check conflicts"}
-              </button>
-            </div>
-
-            {selectedId && byId.get(selectedId) && (
-              <div className="ab-note" style={{ marginBottom: 10 }}>
-                Checking “{byId.get(selectedId)!.title}” moving from{" "}
-                {byId.get(selectedId)!.due_date} to {targetDate || "…"}.
-                {ISO_DATE_RE.test(targetDate) &&
-                  targetDate === byId.get(selectedId)!.due_date && (
-                    <div>
-                      That is already the current due date, so this preview describes the
-                      schedule as it stands — nothing would move.
-                    </div>
-                  )}
-              </div>
-            )}
-
-            {result.status === "error" && (
-              <div className="ab-banner ab-banner--error" role="alert">
-                <div>{result.message}</div>
-              </div>
-            )}
-
-            {result.status === "ok" && (result.conflicts?.length ?? 0) === 0 && (
-              <div className="ab-banner ab-banner--info" role="status">
-                <div>No conflicts detected for that move. It looks safe to reschedule.</div>
-              </div>
-            )}
-
-            {result.status === "ok" && (result.conflicts?.length ?? 0) > 0 && (
-              <div className="ab-list">
-                {result.conflicts!.map((c, i) => (
-                  <div className="ab-row" key={`${c.commitment_id}-${i}`}>
-                    <span
-                      className={`ab-badge ${c.type === "collision" ? "ab-badge--danger" : "ab-badge--warning"}`}
-                    >
-                      {c.type}
-                    </span>
-                    <div className="ab-row__main">
-                      <div className="ab-row__title" title={c.title}>
-                        {c.title}
-                      </div>
-                      <div className="ab-row__meta">{c.reason}</div>
-                    </div>
-                    <span className="ab-badge ab-mono">{c.due_date}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    </section>
-  );
 }

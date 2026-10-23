@@ -59,4 +59,54 @@ reflect the actual code, not assumptions.
 ## Notes
 The backend suite and frontend production build pass in the current checkout.
 Live Bedrock/Gemini runs depend on external quota and are intentionally **not**
-required for reviewer reproduction (Demo Mode covers the full loop).
+required for reviewer reproduction (Demo Mode covers the full loop). Previously
+verified checks are identified as such; pending items must be tested before being
+marked complete.
+
+## 7. Member 5 — Dashboard QA (2026-10-22)
+Full commands, reproduction steps and the unverified list: `docs/dashboard_qa.md`.
+
+- Backend suite re-run on this checkout: `backend/.venv/Scripts/python.exe -m pytest -q` —
+  **160 passed**, agreeing with §1 (this branch's base had 147; Member 3's fallback tests
+  arrived with the integration merge below). Run it from `backend/.venv` — collection needs boto3.
+- Frontend build: `npm run build` (`tsc --noEmit && vite build`) — exit 0, 41 modules,
+  185.8 kB JS / 12.3 kB CSS; the same check §2 records, with the dashboard bundle numbers.
+- Integration merge of `origin/main` into `feature/member-5-dashboard` — **passed**. Member 1's
+  deep-link mirroring, `applied` → resync and 422 error flattening are preserved; their six
+  superseded inline views were replaced by the M5 panels, and the two behaviours unique to
+  those views ("Next up" banner, same-date guard note) were re-implemented in the panels.
+  Re-verified in the browser: `?change=<id>` opens the modal, Apply persists to SQLite, strips
+  the URL parameter and refreshes the dashboard. Details in `docs/dashboard_qa.md` §7.
+- Lint / frontend unit tests: **not available** — neither is configured in `frontend/package.json`.
+- Panel API-contract alignment (`member 5` follow-up) — **passed**. `types.ts`, `api.ts` and
+  `ConfirmModal.tsx` are unchanged; a new `components/ConflictChecker.tsx` container owns the
+  contextual `GET /api/conflicts` call, and `ConflictsPanel.tsx` now extends Member 1's declared
+  `ConflictsPanelProps { conflicts }` instead of fetching. Re-verified in the browser: no request
+  before the button click, collision row + matched plan step, same-date note, no stacked results,
+  error state + **Retry** recovery, abort on unmount; Member 1's deep link, modal and
+  apply → resync still work. `npm run build` exit 0 and `pytest -q` 160 passed on the same tree.
+- Browser check of all three panels in both modes (real API + `VITE_DEMO_MODE`): load, multiple
+  rows, completed vs pending, priority, deadline, empty, error+retry, conflict→plan-step matching,
+  responsive down to 390px — **passed**, console clean.
+- End-to-end flow with `DEMO_FALLBACK=true`: create → plan rebuild → `GET /api/conflicts` →
+  `propose_replan` → `GET /api/changes/{id}` → cancel (dates unchanged) → apply after cancel
+  (**HTTP 409**) → UI confirm modal apply → new dates read back from SQLite in a separate process
+  — **passed**.
+- Completeness audit on `742f625` — `npm run typecheck` exit 0, `npm run build` exit 0
+  (41 modules, 185.9 kB JS / 12.31 kB CSS), `pytest -q` **160 passed**, browser console clean.
+  Four items that were previously only code-verified are now **observed**: first-paint skeletons
+  (7 on Today, 2 on Conflicts, correct `role="status"` + `aria-live` and labels), empty states
+  against a genuinely empty database (`{"commitments":[]}` / `{"plan_items":[]}`) in all three
+  panels, `Cancel proposal` driven through the UI (server reports `cancelled`, dates unchanged,
+  `?change=` stripped, applying the dead id gives **HTTP 409**), and the top-bar `Offline` badge
+  with **Retry** recovery. Responsive behaviour was re-measured with same-origin iframes and the
+  recorded breakpoints corrected: two columns require **>1024px**, row wrap requires **≤860px**.
+  One demo-only source change came out of it — `demoData.ts` now reads `VITE_DEMO_LATENCY_MS`
+  (default still 350 ms), which is what makes the skeleton check reproducible. Full table of
+  results in `docs/dashboard_qa.md` §8.
+- Still **not verified**: live Amazon Bedrock (§6 / `FRICTION_LOG.md` §4), estimated hours
+  (no backend field), plan-step completion transitions (no endpoint), physical devices, screen
+  readers, non-Chromium browsers.
+
+The "Frontend integration and browser-based end-to-end flow" item in §6 is covered for the
+dashboard panels by this section; live Bedrock in §6 remains genuinely open.

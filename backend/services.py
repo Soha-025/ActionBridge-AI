@@ -151,6 +151,38 @@ def _normalize_title(title: str) -> str:
     return " ".join((title or "").strip().lower().split())
 
 
+def _estimate_hours(type: str | None, priority: str | None) -> float:
+    """Deterministic effort estimate (in hours) for a plan step.
+
+    Commitments store no effort field, so the plan builder derives a stable,
+    explainable estimate from the commitment's ``type`` and ``priority`` rather
+    than leaving the dashboard with nothing to render. This is a planning hint
+    only: it is recomputed on every ``_rebuild_plan`` and NEVER persisted, so it
+    can never drift from or corrupt stored data, and it changes no schema.
+    """
+    t = (type or "").strip().lower()
+    if any(k in t for k in ("exam", "quiz", "test")):
+        base = 3.0
+    elif any(k in t for k in ("assignment", "homework", "project", "essay", "lab")):
+        base = 4.0
+    elif any(k in t for k in ("presentation", "seminar", "demo", "talk")):
+        base = 3.0
+    elif any(k in t for k in ("meeting", "call", "interview")):
+        base = 1.0
+    else:  # reading / study / revision / practice / anything unknown
+        base = 2.0
+
+    p = (priority or "").strip().lower()
+    if p in ("high", "urgent", "critical"):
+        modifier = 2.0
+    elif p in ("medium", "normal"):
+        modifier = 1.0
+    else:  # low / missing / unknown
+        modifier = 0.0
+
+    return round(base + modifier, 1)
+
+
 def _require_commitment(conn: sqlite3.Connection, commitment_id: int) -> dict:
     cur = conn.execute("SELECT * FROM commitments WHERE id = ?", (commitment_id,))
     row = cur.fetchone()
@@ -230,6 +262,9 @@ def _rebuild_plan(conn: sqlite3.Connection) -> list[dict]:
     active = conn.execute(
         "SELECT * FROM commitments WHERE status = 'active' ORDER BY due_date ASC, id ASC"
     ).fetchall()
+    # Effort is derived from the source commitment, not stored on plan_items,
+    # so the estimate is always consistent with the current type/priority.
+    hours_by_cid = {c["id"]: _estimate_hours(c["type"], c["priority"]) for c in active}
     now = _now_iso()
     for c in active:
         conn.execute(
@@ -240,7 +275,12 @@ def _rebuild_plan(conn: sqlite3.Connection) -> list[dict]:
     rows = conn.execute(
         "SELECT * FROM plan_items ORDER BY planned_date ASC, id ASC"
     ).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    items = []
+    for r in rows:
+        item = _row_to_dict(r)
+        item["estimated_hours"] = hours_by_cid.get(item["commitment_id"])
+        items.append(item)
+    return items
 
 
 def create_plan() -> dict:

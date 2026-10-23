@@ -39,5 +39,30 @@ A prior QA run appeared to show `/apply` or `/cancel` firing automatically. A **
 
 The earlier report was attributed to HMR/reload plus `fetch` instrumentation, not an application defect.
 
+**Status:** Blocked pending access.
+
+## 5. Frontend and End-to-End Integration
+**Issue:** The frontend files in the current repository were found to be empty when inspected.
+
+**Impact:** The complete browser-to-backend user flow cannot yet be verified from this checkout.
+
+**Next step:** Check with the frontend teammate for the latest implementation and integrate it after reviewing their branch.
+
+**Status:** Pending team integration.
+
+> **Update (Member 5, 2026-10-22):** Resolved in `feature/member-5-dashboard`.
+> The frontend is no longer empty, and the browser-to-backend flow was exercised
+> end-to-end (create → plan → conflict detection → proposal → confirm modal →
+> apply → SQLite persistence, plus the cancel path) against a live FastAPI
+> instance running `DEMO_FALLBACK=true`. Commands and evidence:
+> `docs/dashboard_qa.md`. Live Bedrock is still open in §4.
+
+## 6. Documentation and Submission Preparation
+**Work completed:** Updated the project README, created the architecture diagram, and prepared the demo script. These files were committed and pushed to the `main` branch.
+
+**Next step:** Validate the final demo against the integrated application, record the demo, and prepare the submission materials.
+
+**Status:** Documentation committed; final demo and submission remain pending.
+
 ## 9. Integration / Testing
 Backend and frontend final integration is verified (suite green + production build green + safety lifecycle confirmed at the HTTP/service layer). Remaining submission items (video, Devpost fields, teammates) are handled outside the repository.
