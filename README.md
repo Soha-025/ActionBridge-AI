@@ -44,14 +44,20 @@ Type these into the **Assistant** in order:
 
 1. `I have a Statistics quiz Thursday, an AI assignment Friday and a presentation Saturday.`
    → three commitments are created and persisted.
+
 2. **New session / restart the backend (keep the same DB):**
    `What should I work on today?`
    → the plan is rebuilt from the *saved* commitments (persistent memory across sessions).
+
 3. `My AI assignment deadline changed from Friday to Wednesday.`
    → the agent detects the affected commitment, checks conflicts, and **proposes a replan** (nothing is applied yet).
+
 4. Review the affected tasks / conflict / proposed diff.
+
 5. The **confirmation modal** appears showing old → new dates and "Nothing has been applied yet."
+
 6. Click **Apply changes**.
+
 7. Verify the dashboard updates and the change is marked applied (it persists after refresh).
 
 Also demonstrate **Cancel**: repeat step 3 and choose **Cancel proposal** instead — the existing plan stays **unchanged**.
@@ -64,10 +70,10 @@ ActionBridge uses a **provider abstraction**: the same agent, MCP tools, service
 
 Precedence (highest first):
 
-```
+```text
 DEMO_FALLBACK=true   ->  deterministic DemoProvider   (A. recommended reviewer / no-key mode)
 LLM_PROVIDER=gemini  ->  live GeminiProvider          (B. optional live AI mode)
-otherwise            ->  BedrockProvider               (C. Amazon Bedrock)
+otherwise            ->  BedrockProvider              (C. Amazon Bedrock)
 ```
 
 | Mode | How to enable | Requirements | Notes |
@@ -95,7 +101,7 @@ Copy `backend/.env.example` to `backend/.env` and set only the variables for the
 
 ## Architecture Overview
 
-```
+```text
 Frontend (React/Vite/TS)
   → FastAPI (main.py)
     → ActionBridge Agent (agent.py)            # multi-round tool-use loop
@@ -109,7 +115,8 @@ Frontend (React/Vite/TS)
 
 - The model/agent can only call **five** tools: `create_commitment`, `get_commitments`, `create_plan`, `detect_conflicts`, `propose_replan`.
 - The model **cannot** call `apply_changes` or `cancel_change`. Those (plus `get_change`) are reachable **only** through plain HTTP endpoints that call the service layer directly: `POST /api/changes/{id}/apply` and `POST /api/changes/{id}/cancel`.
-- `propose_replan` **never** mutates a commitment — it records a **pending** change. Applying it is a separate, server-side, human-triggered step. Duplicate applies are rejected (HTTP 409); reload never auto-applies or auto-cancels.
+- `propose_replan` **never** mutates a commitment — it records a **pending** change. Applying it is a separate, server-side, human-triggered step.
+- Duplicate applies are rejected (HTTP 409); reload never auto-applies or auto-cancels.
 
 ---
 
@@ -135,13 +142,13 @@ Interactive docs: `http://localhost:8000/docs` while the backend is running.
 
 ```bash
 cd backend
-pip install -r requirements-dev.txt          # adds pytest + httpx on top of runtime deps
-DEMO_FALLBACK=true python -m pytest -q        # keep provider selection deterministic
+pip install -r requirements-dev.txt
+DEMO_FALLBACK=true python -m pytest -q
 ```
 
 Latest evidence:
 
-- **Backend:** **197 tests passed** with one non-blocking Starlette/httpx deprecation warning.
+- **Backend:** **236 tests passed** with one non-blocking Starlette/httpx deprecation warning.
 - **Frontend:** `npm run build` (TypeScript check + Vite production build) **passes**.
 
 > Note: set `DEMO_FALLBACK=true` (or otherwise leave `LLM_PROVIDER` unset) so the suite does not pick up a `LLM_PROVIDER=gemini` from a local `.env`, which would make the provider-selection test fail for environmental reasons.
