@@ -21,6 +21,11 @@ The five model-facing functions used by the MCP layer are:
     propose_replan
 The three server-side-only functions are:
     get_change, apply_changes, cancel_change
+
+Two further server-side-only commitment operations back the dashboard's
+"check off / delete" controls -- ``set_commitment_status`` and
+``delete_commitment``. Like apply/cancel they are reachable ONLY through plain
+HTTP endpoints and are NEVER exposed to the model, agent, or MCP.
 """
 
 from __future__ import annotations
@@ -592,3 +597,71 @@ def cancel_change(change_id: str) -> dict:
         else:
             new_status = change["status"]
     return {"change_id": change_id, "status": new_status}
+
+
+# ---------------------------------------------------------------------------
+# Server-side-only commitment operations (NOT exposed to the model)
+#
+# These back the dashboard's per-row "check off" and "delete" controls. They
+# mutate stored commitments and then rebuild the plan so the plan stays a
+# deterministic projection of active commitments. They are reachable only via
+# plain HTTP endpoints; the agent/LLM/MCP path never calls them.
+# ---------------------------------------------------------------------------
+
+# The only commitment statuses the UI is allowed to set directly. 'cancelled' is
+# reserved for the change lifecycle, so a check-off toggles between these two.
+_EDITABLE_COMMITMENT_STATUSES = ("active", "completed")
+
+
+def set_commitment_status(commitment_id: int, status: str) -> dict:
+    """SERVER-SIDE ONLY: check a commitment off (completed) or back on (active).
+
+    Marking a commitment 'completed' is persistent and self-consistent with the
+    planner: ``_rebuild_plan`` only schedules active commitments, so the step
+    disappears from the plan on the same call. Reactivating it ('active') brings
+    the step back. An unknown id raises ValueError (-> 404); a disallowed status
+    raises ValueError (-> 400).
+
+    Returns: {"commitment": {...}, "plan_items": [...]}
+    """
+    if status not in _EDITABLE_COMMITMENT_STATUSES:
+        raise ValueError(
+            "status must be one of "
+            + ", ".join(repr(s) for s in _EDITABLE_COMMITMENT_STATUSES)
+        )
+
+    with db() as conn:
+        _require_commitment(conn, commitment_id)
+        conn.execute(
+            "UPDATE commitments SET status = ? WHERE id = ?",
+            (status, commitment_id),
+        )
+        commitment = _row_to_dict(
+            conn.execute("SELECT * FROM commitments WHERE id = ?", (commitment_id,)).fetchone()
+        )
+        plan_items = _rebuild_plan(conn)
+
+    return {"commitment": commitment, "plan_items": plan_items}
+
+
+def delete_commitment(commitment_id: int) -> dict:
+    """SERVER-SIDE ONLY: permanently remove a commitment and everything derived
+    from it.
+
+    Children are deleted first so ``PRAGMA foreign_keys = ON`` is never
+    violated: its plan steps and any pending/applied change that referenced it.
+    The remaining plan is then rebuilt, so this is exactly what the user asked
+    for (the commitment is gone) without disturbing other commitments or an
+    unrelated proposal. An unknown id raises ValueError (-> 404).
+
+    Returns: {"deleted_id": <int>, "plan_items": [...]}
+    """
+    with db() as conn:
+        _require_commitment(conn, commitment_id)
+        conn.execute("DELETE FROM plan_items WHERE commitment_id = ?", (commitment_id,))
+        conn.execute("DELETE FROM pending_changes WHERE commitment_id = ?", (commitment_id,))
+        conn.execute("DELETE FROM commitments WHERE id = ?", (commitment_id,))
+        plan_items = _rebuild_plan(conn)
+
+    return {"deleted_id": commitment_id, "plan_items": plan_items}
+

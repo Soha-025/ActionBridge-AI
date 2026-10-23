@@ -139,6 +139,9 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [dataError, setDataError] = useState<string | null>(null);
+  // Which commitment id has an in-flight check-off/delete, so exactly that one
+  // row's buttons disable while every other row stays interactive.
+  const [busyCommitmentId, setBusyCommitmentId] = useState<number | null>(null);
 
   const [modalChangeId, setModalChangeId] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
@@ -301,6 +304,63 @@ export default function App() {
     [forgetPending, load],
   );
 
+  /**
+   * Check a commitment off ('completed') or back on ('active'). The row updates
+   * locally first for instant feedback, the server call persists it, then a
+   * refresh reconciles with the authoritative (rebuilt) plan. On failure the
+   * error is surfaced and the refresh restores the true state.
+   */
+  const handleToggleCommitment = useCallback(
+    async (commitmentId: number, done: boolean) => {
+      const next = done ? "active" : "completed";
+      setCommitments((prev) =>
+        prev.map((c) => (c.id === commitmentId ? { ...c, status: next } : c)),
+      );
+      // Completing drops the step from the plan; reactivating reappears on refresh.
+      if (next === "completed") {
+        setPlan((prev) => prev.filter((p) => p.commitment_id !== commitmentId));
+      }
+      setBusyCommitmentId(commitmentId);
+      try {
+        await source.setCommitmentStatus(commitmentId, next);
+        await load("refresh");
+      } catch (err) {
+        setDataError(
+          err instanceof ApiError
+            ? err.message
+            : "Could not update that commitment. The change was not saved.",
+        );
+        await load("refresh");
+      } finally {
+        setBusyCommitmentId(null);
+      }
+    },
+    [source, load],
+  );
+
+  /** Permanently remove a commitment, optimistically then from the server. */
+  const handleDeleteCommitment = useCallback(
+    async (commitmentId: number) => {
+      setCommitments((prev) => prev.filter((c) => c.id !== commitmentId));
+      setPlan((prev) => prev.filter((p) => p.commitment_id !== commitmentId));
+      setBusyCommitmentId(commitmentId);
+      try {
+        await source.deleteCommitment(commitmentId);
+        await load("refresh");
+      } catch (err) {
+        setDataError(
+          err instanceof ApiError
+            ? err.message
+            : "Could not delete that commitment. It is still saved.",
+        );
+        await load("refresh");
+      } finally {
+        setBusyCommitmentId(null);
+      }
+    },
+    [source, load],
+  );
+
   // Deep link support: /?change=<id> opens that proposal straight from the API.
   useEffect(() => {
     const params = new URLSearchParams(globalThis.location?.search ?? "");
@@ -444,6 +504,9 @@ export default function App() {
                     loading={loading}
                     error={dataError}
                     onRetry={handleRefresh}
+                    onToggleCommitment={handleToggleCommitment}
+                    onDeleteCommitment={handleDeleteCommitment}
+                    busyCommitmentId={busyCommitmentId}
                   />
                   <CommitmentsPanel
                     title="Upcoming deadlines"
@@ -454,6 +517,9 @@ export default function App() {
                     onRetry={handleRefresh}
                     maxVisible={6}
                     showNextUp
+                    onToggleCommitment={handleToggleCommitment}
+                    onDeleteCommitment={handleDeleteCommitment}
+                    busyCommitmentId={busyCommitmentId}
                   />
                 </div>
               )}
@@ -469,6 +535,9 @@ export default function App() {
                     error={dataError}
                     onRetry={handleRefresh}
                     emptyHint="Capture a few commitments with the Assistant to build a plan."
+                    onToggleCommitment={handleToggleCommitment}
+                    onDeleteCommitment={handleDeleteCommitment}
+                    busyCommitmentId={busyCommitmentId}
                   />
                   <CommitmentsPanel
                     title="All commitments"
@@ -477,6 +546,9 @@ export default function App() {
                     loading={loading}
                     error={dataError}
                     onRetry={handleRefresh}
+                    onToggleCommitment={handleToggleCommitment}
+                    onDeleteCommitment={handleDeleteCommitment}
+                    busyCommitmentId={busyCommitmentId}
                   />
                 </div>
               )}

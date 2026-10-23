@@ -30,6 +30,9 @@ import type {
   Conflict,
   ConflictsQuery,
   ConflictsResponse,
+  CommitmentStatus,
+  CommitmentStatusResponse,
+  DeleteCommitmentResponse,
   MovedItem,
   PlanItem,
   PlanResponse,
@@ -107,7 +110,7 @@ export class ApiError extends Error {
 // ---------------------------------------------------------------------------
 
 interface RequestOptions {
-  method: "GET" | "POST";
+  method: "GET" | "POST" | "PATCH" | "DELETE";
   body?: unknown;
   /** Total timeout in ms. */
   timeoutMs?: number;
@@ -371,6 +374,22 @@ function shapeApplyResponse(raw: unknown): ApplyChangeResponse {
   };
 }
 
+function shapeCommitmentStatusResponse(raw: unknown): CommitmentStatusResponse {
+  const r = asRecord(raw);
+  return {
+    commitment: shapeCommitment(r.commitment),
+    plan_items: asArray(r.plan_items, shapePlanItem),
+  };
+}
+
+function shapeDeleteCommitmentResponse(raw: unknown, fallbackId: number): DeleteCommitmentResponse {
+  const r = asRecord(raw);
+  return {
+    deleted_id: asNumber(r.deleted_id, fallbackId),
+    plan_items: asArray(r.plan_items, shapePlanItem),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Public, typed endpoints (1:1 with backend/main.py)
 // ---------------------------------------------------------------------------
@@ -445,6 +464,33 @@ export const api = {
       const r = asRecord(raw);
       return { change_id: asString(r.change_id, changeId), status: asString(r.status, "unknown") };
     });
+  },
+
+  /** PATCH /api/commitments/{id} — check a commitment off ('completed') or back
+   *  on ('active'). A server-side dashboard control, never reachable from the
+   *  agent/MCP path. */
+  setCommitmentStatus(
+    commitmentId: number,
+    status: CommitmentStatus,
+    signal?: AbortSignal,
+  ): Promise<CommitmentStatusResponse> {
+    return request<unknown>(`/api/commitments/${commitmentId}`, {
+      method: "PATCH",
+      body: { status },
+      signal,
+    }).then(shapeCommitmentStatusResponse);
+  },
+
+  /** DELETE /api/commitments/{id} — remove a commitment and its plan steps.
+   *  Server-side dashboard control, never reachable from the agent/MCP path. */
+  deleteCommitment(
+    commitmentId: number,
+    signal?: AbortSignal,
+  ): Promise<DeleteCommitmentResponse> {
+    return request<unknown>(`/api/commitments/${commitmentId}`, {
+      method: "DELETE",
+      signal,
+    }).then((raw) => shapeDeleteCommitmentResponse(raw, commitmentId));
   },
 };
 

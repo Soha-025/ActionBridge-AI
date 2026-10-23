@@ -21,7 +21,7 @@ import {
   priorityTone,
   statusTone,
 } from "../format";
-import { EmptyState, ErrorState, LoadingRows } from "./PanelState";
+import { EmptyState, ErrorState, ItemActions, LoadingRows } from "./PanelState";
 
 export interface CommitmentsPanelProps {
   commitments: Commitment[];
@@ -39,11 +39,30 @@ export interface CommitmentsPanelProps {
    * does not need a single next-up pointer.
    */
   showNextUp?: boolean;
+  /** Check a commitment off/reactivate, keyed by commitment id. */
+  onToggleCommitment?: (commitmentId: number, done: boolean) => void;
+  /** Delete a commitment. */
+  onDeleteCommitment?: (commitmentId: number) => void;
+  /** Commitment id currently mid-request, so only that row's buttons disable. */
+  busyCommitmentId?: number | null;
 }
 
-function CommitmentRow({ item, today }: { item: Commitment; today: string }) {
+function CommitmentRow({
+  item,
+  today,
+  onToggleCommitment,
+  onDeleteCommitment,
+  busyCommitmentId,
+}: {
+  item: Commitment;
+  today: string;
+  onToggleCommitment?: (commitmentId: number, done: boolean) => void;
+  onDeleteCommitment?: (commitmentId: number) => void;
+  busyCommitmentId?: number | null;
+}) {
   const done = isCompletedStatus(item.status);
   const overdue = !done && (dayDiff(today, item.due_date) ?? 0) < 0;
+  const showActions = !!onToggleCommitment || !!onDeleteCommitment;
 
   return (
     <div className="ab-row">
@@ -66,6 +85,14 @@ function CommitmentRow({ item, today }: { item: Commitment; today: string }) {
           {capitalize(item.status || "unknown")}
         </span>
       </div>
+      {showActions && (
+        <ItemActions
+          done={done}
+          busy={busyCommitmentId === item.id}
+          onToggle={() => onToggleCommitment?.(item.id, done)}
+          onDelete={() => onDeleteCommitment?.(item.id)}
+        />
+      )}
     </div>
   );
 }
@@ -79,6 +106,9 @@ export default function CommitmentsPanel({
   title = "Commitments",
   maxVisible,
   showNextUp = false,
+  onToggleCommitment,
+  onDeleteCommitment,
+  busyCommitmentId,
 }: CommitmentsPanelProps) {
   const sorted = useMemo(() => [...commitments].sort(compareByDeadline), [commitments]);
 
@@ -141,7 +171,14 @@ export default function CommitmentsPanel({
             )}
             <div className="ab-list">
               {visible.map((item) => (
-                <CommitmentRow key={item.id} item={item} today={today} />
+                <CommitmentRow
+                  key={item.id}
+                  item={item}
+                  today={today}
+                  onToggleCommitment={onToggleCommitment}
+                  onDeleteCommitment={onDeleteCommitment}
+                  busyCommitmentId={busyCommitmentId}
+                />
               ))}
             </div>
             {visible.length < sorted.length && (

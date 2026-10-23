@@ -21,9 +21,12 @@ import type {
   Commitment,
   CommitmentsQuery,
   CommitmentsResponse,
+  CommitmentStatus,
+  CommitmentStatusResponse,
   ConflictsQuery,
   ConflictsResponse,
   Conflict,
+  DeleteCommitmentResponse,
   PlanItem,
   PlanResponse,
 } from "./types";
@@ -55,11 +58,19 @@ export function isDemoMode(): boolean {
   return value === "1" || value === "true" || value === "yes" || value === "on";
 }
 
-/** The three read endpoints the dashboard needs, from either source. */
+/** The endpoints the dashboard needs, from either source. */
 export interface DashboardSource {
   getCommitments(query?: CommitmentsQuery, signal?: AbortSignal): Promise<CommitmentsResponse>;
   getPlan(signal?: AbortSignal): Promise<PlanResponse>;
   getConflicts(params: ConflictsQuery, signal?: AbortSignal): Promise<ConflictsResponse>;
+  /** Check a commitment off ('completed') or back on ('active'). */
+  setCommitmentStatus(
+    commitmentId: number,
+    status: CommitmentStatus,
+    signal?: AbortSignal,
+  ): Promise<CommitmentStatusResponse>;
+  /** Remove a commitment and its derived plan steps. */
+  deleteCommitment(commitmentId: number, signal?: AbortSignal): Promise<DeleteCommitmentResponse>;
 }
 
 function wait(ms: number, signal?: AbortSignal): Promise<void> {
@@ -171,6 +182,24 @@ function detectDemoConflicts(commitments: Commitment[], params: ConflictsQuery):
 export function createDemoSource(today: string): DashboardSource {
   const commitments = buildCommitments(today);
   const planItems = buildPlanItems(today);
+  const hoursById = new Map(DEMO_SEED.map((seed) => [seed.id, seed.hours]));
+
+  const sortPlan = () => {
+    planItems.sort(
+      (a, b) => a.planned_date.localeCompare(b.planned_date) || a.id - b.id,
+    );
+  };
+
+  /** Mirror _rebuild_plan's one-step-per-active-commitment when work is reopened. */
+  const makeStep = (c: Commitment): PlanItem => ({
+    id: c.id,
+    commitment_id: c.id,
+    title: `Work on ${c.title.toLowerCase()}`,
+    planned_date: c.due_date,
+    status: "planned",
+    created_at: CREATED_AT,
+    hours: hoursById.get(c.id) ?? null,
+  });
 
   return {
     async getCommitments(query: CommitmentsQuery = {}, signal?: AbortSignal): Promise<CommitmentsResponse> {
@@ -189,7 +218,7 @@ export function createDemoSource(today: string): DashboardSource {
       await wait(LATENCY_MS, signal);
       // The real /api/plan does not send `today`; the demo mirrors that, so the
       // reference date still comes from VITE_DEMO_TODAY.
-      return { plan_items: planItems };
+      return { plan_items: [...planItems] };
     },
 
     async getConflicts(params: ConflictsQuery, signal?: AbortSignal): Promise<ConflictsResponse> {
@@ -202,5 +231,48 @@ export function createDemoSource(today: string): DashboardSource {
       }
       return { conflicts: detectDemoConflicts(commitments, params) };
     },
+
+    async setCommitmentStatus(
+      commitmentId: number,
+      status: CommitmentStatus,
+      signal?: AbortSignal,
+    ): Promise<CommitmentStatusResponse> {
+      await wait(LATENCY_MS, signal);
+      const target = commitments.find((item) => item.id === commitmentId);
+      if (!target) {
+        throw new ApiError(`Unknown commitment id: ${commitmentId}`, { status: 404 });
+      }
+      if (status !== "active" && status !== "completed") {
+        throw new ApiError("status must be one of 'active', 'completed'", { status: 400 });
+      }
+      target.status = status;
+      // Mirror _rebuild_plan: a completed commitment loses its step, an
+      // active one has exactly one step on its due date.
+      const stepIndex = planItems.findIndex((item) => item.commitment_id === commitmentId);
+      if (status === "completed") {
+        if (stepIndex >= 0) planItems.splice(stepIndex, 1);
+      } else if (stepIndex < 0) {
+        planItems.push(makeStep(target));
+        sortPlan();
+      }
+      return { commitment: { ...target }, plan_items: [...planItems] };
+    },
+
+    async deleteCommitment(
+      commitmentId: number,
+      signal?: AbortSignal,
+    ): Promise<DeleteCommitmentResponse> {
+      await wait(LATENCY_MS, signal);
+      const index = commitments.findIndex((item) => item.id === commitmentId);
+      if (index < 0) {
+        throw new ApiError(`Unknown commitment id: ${commitmentId}`, { status: 404 });
+      }
+      commitments.splice(index, 1);
+      for (let i = planItems.length - 1; i >= 0; i -= 1) {
+        if (planItems[i].commitment_id === commitmentId) planItems.splice(i, 1);
+      }
+      return { deleted_id: commitmentId, plan_items: [...planItems] };
+    },
   };
 }
+

@@ -552,3 +552,47 @@ button { font-family: inherit; }
 @media (prefers-reduced-motion: reduce) {
   .ab-mic-btn--live { animation: none; }
 }
+
+/* ---------------------------------------------------------- row actions */
+/* M2 additive: per-row check-off + delete controls shared by TodayPlan and
+   CommitmentsPanel (rendered by ItemActions). New scoped classes only —
+   nothing above this line was changed. */
+.ab-row__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.ab-row__action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.ab-row__action svg { width: 16px; height: 16px; }
+.ab-row__action:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.ab-row__action:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+.ab-row__action:disabled { opacity: 0.5; cursor: default; }
+.ab-row__action--tick.is-done { color: var(--primary); border-color: var(--primary); }
+.ab-row__action--delete:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+@media (max-width: 860px) {
+  .ab-row__actions { width: 100%; justify-content: flex-end; }
+}

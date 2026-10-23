@@ -19,7 +19,7 @@ import {
   isCompletedStatus,
   statusTone,
 } from "../format";
-import { EmptyState, ErrorState, LoadingRows } from "./PanelState";
+import { EmptyState, ErrorState, ItemActions, LoadingRows } from "./PanelState";
 
 export interface TodayPlanProps {
   /** Plan steps to display; already filtered by the caller for "today". */
@@ -34,6 +34,15 @@ export interface TodayPlanProps {
   groupByDate?: boolean;
   /** Extra hint text for the empty state. */
   emptyHint?: string;
+  /**
+   * Check a plan step's underlying commitment off/reactivate, keyed by
+   * commitment id. Omitted = the row shows no controls.
+   */
+  onToggleCommitment?: (commitmentId: number, done: boolean) => void;
+  /** Delete a commitment from its plan row. Omitted = no delete control. */
+  onDeleteCommitment?: (commitmentId: number) => void;
+  /** Commitment id currently mid-request, so only that row's buttons disable. */
+  busyCommitmentId?: number | null;
 }
 
 const COMPARABLE = (a: PlanItem, b: PlanItem): number => {
@@ -41,9 +50,22 @@ const COMPARABLE = (a: PlanItem, b: PlanItem): number => {
   return byDate !== 0 ? byDate : a.id - b.id;
 };
 
-function PlanRow({ item, showDate }: { item: PlanItem; showDate: boolean }) {
+interface RowActions {
+  onToggleCommitment?: (commitmentId: number, done: boolean) => void;
+  onDeleteCommitment?: (commitmentId: number) => void;
+  busyCommitmentId?: number | null;
+}
+
+function PlanRow({
+  item,
+  showDate,
+  onToggleCommitment,
+  onDeleteCommitment,
+  busyCommitmentId,
+}: { item: PlanItem; showDate: boolean } & RowActions) {
   const done = isCompletedStatus(item.status);
   const hours = formatHours(item.hours);
+  const showActions = !!onToggleCommitment || !!onDeleteCommitment;
 
   return (
     <div className="ab-row">
@@ -63,6 +85,14 @@ function PlanRow({ item, showDate }: { item: PlanItem; showDate: boolean }) {
           {done ? "Completed" : item.status || "Unknown"}
         </span>
       </div>
+      {showActions && (
+        <ItemActions
+          done={done}
+          busy={busyCommitmentId === item.commitment_id}
+          onToggle={() => onToggleCommitment?.(item.commitment_id, done)}
+          onDelete={() => onDeleteCommitment?.(item.commitment_id)}
+        />
+      )}
     </div>
   );
 }
@@ -76,6 +106,9 @@ export default function TodayPlan({
   title = "Today's focus",
   groupByDate = false,
   emptyHint = "Ask the Assistant what to work on, or add a commitment — the plan is built from saved deadlines.",
+  onToggleCommitment,
+  onDeleteCommitment,
+  busyCommitmentId,
 }: TodayPlanProps) {
   const sorted = useMemo(() => [...items].sort(COMPARABLE), [items]);
 
@@ -129,7 +162,14 @@ export default function TodayPlan({
                   </div>
                   <div className="ab-list">
                     {bucket.map((item) => (
-                      <PlanRow key={item.id} item={item} showDate={false} />
+                      <PlanRow
+                        key={item.id}
+                        item={item}
+                        showDate={false}
+                        onToggleCommitment={onToggleCommitment}
+                        onDeleteCommitment={onDeleteCommitment}
+                        busyCommitmentId={busyCommitmentId}
+                      />
                     ))}
                   </div>
                 </div>
@@ -137,7 +177,14 @@ export default function TodayPlan({
             ) : (
               <div className="ab-list">
                 {sorted.map((item) => (
-                  <PlanRow key={item.id} item={item} showDate />
+                  <PlanRow
+                    key={item.id}
+                    item={item}
+                    showDate
+                    onToggleCommitment={onToggleCommitment}
+                    onDeleteCommitment={onDeleteCommitment}
+                    busyCommitmentId={busyCommitmentId}
+                  />
                 ))}
               </div>
             )}

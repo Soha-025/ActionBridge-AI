@@ -152,6 +152,29 @@ export interface CancelChangeResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Commitment check-off / delete (server-side dashboard controls)
+// ---------------------------------------------------------------------------
+
+/**
+ * The only statuses a user may set directly from a dashboard row. A "tick"
+ * toggles between them: completing hides the step from the plan, reactivating
+ * brings it back. Deleting a commitment removes it entirely.
+ */
+export type CommitmentStatus = "active" | "completed";
+
+/** Response for PATCH /api/commitments/{id}. */
+export interface CommitmentStatusResponse {
+  commitment: Commitment | null;
+  plan_items: PlanItem[];
+}
+
+/** Response for DELETE /api/commitments/{id}. */
+export interface DeleteCommitmentResponse {
+  deleted_id: number;
+  plan_items: PlanItem[];
+}
+
+// ---------------------------------------------------------------------------
 // Query filters
 // ---------------------------------------------------------------------------
 

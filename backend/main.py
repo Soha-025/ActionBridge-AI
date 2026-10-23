@@ -10,6 +10,8 @@ Only the previously hardcoded bodies are replaced with real integrations:
   * /api/changes/{id}         -> services.get_change
   * /api/changes/{id}/apply   -> services.apply_changes   (HUMAN confirmation)
   * /api/changes/{id}/cancel  -> services.cancel_change   (HUMAN confirmation)
+  * /api/commitments/{id} PATCH   -> services.set_commitment_status (check off)
+  * /api/commitments/{id} DELETE  -> services.delete_commitment     (remove)
 
 SAFETY BOUNDARY
 ---------------
@@ -18,6 +20,10 @@ through these plain HTTP endpoints, which call the service layer directly.
 They are NOT wired through the agent, the LLM, or MCP. The model path is
 strictly /api/chat -> agent -> MCP -> the five safe tools. There is no
 code path from the LLM to apply_changes.
+
+The commitment check-off / delete endpoints follow the SAME rule: they call
+the service layer directly and are never exposed to the model, so a chat turn
+cannot complete or delete a commitment on its own.
 
 This module imports cleanly with NO AWS credentials, NO Bedrock access, and
 NO database file: the production agent/provider is built lazily on the first
@@ -63,6 +69,13 @@ logger = logging.getLogger("actionbridge-backend")
 class ChatRequest(BaseModel):
     session_id: str
     text: str
+
+
+class CommitmentStatusRequest(BaseModel):
+    """Body for PATCH /api/commitments/{id}. Only 'active'/'completed' are
+    accepted by the service layer; anything else is rejected as a 400."""
+
+    status: str
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +237,30 @@ async def get_commitments(
     except Exception:
         logger.exception("Unexpected error in /api/commitments")
         raise HTTPException(status_code=500, detail="Internal server error") from None
+
+
+# 2b. Check off / reactivate a commitment  (SERVER-SIDE ONLY: services, never agent/LLM/MCP)
+@app.patch("/api/commitments/{commitment_id}")
+async def update_commitment(commitment_id: int, payload: CommitmentStatusRequest):
+    try:
+        return services.set_commitment_status(commitment_id, payload.status)
+    except ValueError as err:
+        raise _not_found_or_http(err) from None
+    except Exception:
+        logger.exception("Unexpected error updating commitment status")
+        raise HTTPException(status_code=500, detail="Failed to update commitment") from None
+
+
+# 2c. Delete a commitment  (SERVER-SIDE ONLY: services, never agent/LLM/MCP)
+@app.delete("/api/commitments/{commitment_id}")
+async def remove_commitment(commitment_id: int):
+    try:
+        return services.delete_commitment(commitment_id)
+    except ValueError as err:
+        raise _not_found_or_http(err) from None
+    except Exception:
+        logger.exception("Unexpected error deleting commitment")
+        raise HTTPException(status_code=500, detail="Failed to delete commitment") from None
 
 
 # 3. Get Plan
