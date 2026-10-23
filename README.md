@@ -122,7 +122,7 @@ Frontend (React/Vite/TS)
 - Duplicate applies are rejected (HTTP 409); reload never auto-applies or auto-cancels.
 
 ---
-
+```
 ## API Endpoints
 
 | Method | Endpoint | Purpose |
