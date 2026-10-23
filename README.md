@@ -111,17 +111,17 @@ Copy `backend/.env.example` to `backend/.env` and configure only the variables r
 
 ## Architecture Overview
 
+
 The complete ActionBridge AI architecture is shown below:
 
-```text id="e1hqlv"
 ![ActionBridge AI Architecture](docs/architecture.png)
-```
 
 The diagram above is loaded directly from `docs/architecture.png` in this repository.
 
 ActionBridge follows this overall architecture:
 
-```text id="86mmbc"
+```
+
 Frontend (React / Vite / TypeScript)
   → FastAPI (main.py)
     → ActionBridge Agent (agent.py)
